@@ -7,7 +7,6 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import requests
 
-from ..core.baseline import differs_from_all
 from ..core.models import Confidence, Finding, Severity
 
 MODULE_NAME = "xss"
@@ -65,48 +64,106 @@ def _inject(url: str, param: str, value: str) -> str:
     return urlunparse(parsed._replace(query=urlencode(params, doseq=True)))
 
 
+_CTX_LABELS = {
+    "html": "HTML body",
+    "script": "inline <script>",
+    "event": "an event-handler attribute",
+    "attribute": "an HTML attribute",
+    "rcdata": "a <textarea>/<title>",
+    "comment": "an HTML comment",
+}
+
+
+def _context(body: str, idx: int) -> str:
+    prefix = body[:idx]
+    low = prefix.lower()
+    so, sc = low.rfind("<script"), low.rfind("</script")
+    if so != -1 and so > sc:
+        return "script"
+    for tag in ("textarea", "title"):
+        to, tc = low.rfind("<" + tag), low.rfind("</" + tag)
+        if to != -1 and to > tc:
+            return "rcdata"
+    cs, ce = prefix.rfind("<!--"), prefix.rfind("-->")
+    if cs != -1 and cs > ce:
+        return "comment"
+    lt, gt = prefix.rfind("<"), prefix.rfind(">")
+    if lt > gt:
+        if re.search(r"\bon\w+\s*=\s*[\"']?[^\"'>]*$", prefix[lt:], re.I):
+            return "event"
+        return "attribute"
+    return "html"
+
+
+def _classify(context: str, dq: bool, sq: bool):
+    if context in ("html", "script", "event"):
+        return Severity.HIGH, Confidence.CONFIRMED, True
+    if context == "attribute":
+        if dq or sq:
+            return Severity.HIGH, Confidence.CONFIRMED, True
+        return Severity.MEDIUM, Confidence.TENTATIVE, False
+    return Severity.MEDIUM, Confidence.TENTATIVE, False
+
+
 def _test_reflected(ctx, url, param) -> Finding | None:
     payload, tok = _marker()
-    raw_signature = f"{tok}<x>"
+    canary = f"lop{tok}"
 
     try:
-        clean = ctx.session.get(_inject(url, param, f"lop{tok}clean"),
+        clean = ctx.session.get(_inject(url, param, f"{canary}clean"),
                                 timeout=ctx.timeout).text
         test = ctx.session.get(_inject(url, param, payload),
                                timeout=ctx.timeout).text
     except requests.RequestException:
         return None
 
-    if raw_signature not in test:
+    idx = test.find(canary)
+    if idx == -1:
         return None
 
+    raw_signature = f"{tok}<x>"
     baseline_body = getattr(getattr(ctx, "baseline", None), "root", None)
-    refs = [clean]
-    if baseline_body is not None:
-        refs.append(baseline_body.body)
+    refs = [clean] + ([baseline_body.body] if baseline_body is not None else [])
     if any(raw_signature in r for r in refs):
         return None
-    if not differs_from_all(test, refs, max_similarity=1.0):
-        pass
+
+    after = test[idx + len(canary): idx + len(canary) + 8]
+    angle = "<x>" in after
+    dq, sq = '"' in after, "'" in after
+    if not angle:
+        return None
+
+    context = _context(test, idx)
+    severity, confidence, exploitable = _classify(context, dq, sq)
 
     if not _retry_confirm(ctx, url, param):
         return None
 
+    snippet = test[max(0, idx - 30): idx + len(canary) + 12].replace("\n", " ")
+    label = _CTX_LABELS.get(context, context)
+    if exploitable:
+        name = "Reflected XSS"
+        desc = (f"Input to '{param}' is reflected unencoded in {label} context "
+                "(raw '<' and '>'"
+                + (", plus a quote," if (dq or sq) else "")
+                + " survive), allowing script injection in the victim's browser.")
+    else:
+        name = "Reflected input (possible XSS)"
+        desc = (f"Input to '{param}' is reflected unencoded in {label} context. "
+                "Raw angle brackets survive, but reaching script execution needs a "
+                "break-out sequence not verified here — confirm manually.")
+
     return Finding(
-        name="Reflected XSS",
-        severity=Severity.HIGH,
+        name=name,
+        severity=severity,
         location=f"{url} [param: {param}]",
-        description=(
-            f"Input to parameter '{param}' is reflected into the response "
-            "without HTML-encoding (raw '<', '>' survive), allowing script "
-            "injection in the user's browser."
-        ),
+        description=desc,
         remediation="Context-aware output encoding on all reflected input; apply "
                     "a restrictive CSP as defence in depth.",
         module=MODULE_NAME, category=CATEGORY,
-        evidence=_snippet(ctx, url, param),
-        request=f"GET {_inject(url, param, '<payload>')}",
-        confidence=Confidence.CONFIRMED,
+        evidence=f"[{context}] {snippet}",
+        request=f"GET {_inject(url, param, payload)}",
+        confidence=confidence,
     )
 
 
@@ -121,18 +178,6 @@ def _retry_confirm(ctx, url, param, attempts: int = 2) -> bool:
         if f"{tok}<x>" not in body:
             return False
     return True
-
-
-def _snippet(ctx, url, param) -> str:
-    payload, tok = _marker()
-    try:
-        body = ctx.session.get(_inject(url, param, payload), timeout=ctx.timeout).text
-    except requests.RequestException:
-        return ""
-    idx = body.find(f"{tok}<x>")
-    if idx == -1:
-        return ""
-    return body[max(0, idx - 30):idx + 40].replace("\n", " ")
 
 
 def _test_stored(ctx, phase) -> None:

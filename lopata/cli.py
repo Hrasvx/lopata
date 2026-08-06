@@ -201,6 +201,13 @@ def run_scan(args) -> int:
             ui.advance_overall()
             continue
         module = INTEGRATIONS[name]
+        info = module.available(ctx)
+        if not info.available:
+            ui.note(f"recon: {name} — skipped ({info.note or 'not available'})")
+            completed.append(key)
+            ckpt.save(ctx, cp_path, completed)
+            ui.advance_overall()
+            continue
         ph = ui.phase(f"recon: {name}", total=1)
         try:
             module.run(ctx, ph)

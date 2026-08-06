@@ -1,0 +1,11 @@
+.venv/
+third_party/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+lopata_report_*.pdf
+lopata_report_*.json
+.lopata_checkpoint_*.json
+*.log

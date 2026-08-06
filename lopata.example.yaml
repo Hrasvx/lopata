@@ -1,0 +1,41 @@
+# lopata scan profile — copy, edit, then:  lopata example.com --config this.yaml
+# CLI flags always override values set here.
+
+threads: 10
+timeout: 10.0
+max_pages: 100
+verify_tls: true
+
+# Response-similarity threshold for the not-found baseline (0..1). Higher = more
+# aggressive at treating pages as "same as absent" (fewer false positives, but
+# risks masking a real hit on very templated sites).
+baseline_threshold: 0.92
+
+# Which web-layer modules to run. null == all.
+# Choices: crawler, headers, cookies, clickjacking, cors, exposure, misconfig,
+#          redirect, csrf, xss, sqli
+modules: null
+
+# External tool integrations. Set false to skip a tool even if installed.
+tools:
+  nmap: true
+  nikto: true
+  sslscan: true      # sslyze or testssl.sh, whichever is present
+  whatweb: true
+  subfinder: true
+
+# Per-tool tuning (optional).
+nmap_fast: true       # top-100 ports only
+nmap_vuln: true       # run --script vuln
+nmap_timeout: 300
+nikto_maxtime: 120
+nikto_timeout: 240
+ssl_timeout: 180
+whatweb_timeout: 90
+subfinder_timeout: 120
+
+# Authenticated scan (optional). Prefer --auth-cookie / --auth-header on the CLI
+# so secrets stay out of committed config files.
+auth:
+  cookie: null
+  headers: []

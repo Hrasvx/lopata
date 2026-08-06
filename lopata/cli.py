@@ -78,28 +78,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Write a detailed log to this file.")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="Verbose logging.")
-    p.add_argument("-y", "--yes", action="store_true",
-                   help="Skip the interactive authorization prompt "
-                        "(you still assert you are authorized).")
     p.add_argument("--no-ui", action="store_true",
                    help="Disable the rich live UI (plain output).")
     p.add_argument("--version", action="version", version=f"lopata {__version__}")
     return p
-
-
-def _consent(target: str, assume_yes: bool, ui: LopataUI) -> bool:
-    if assume_yes:
-        return True
-    if not sys.stdin.isatty():
-        print("Refusing to scan without authorization confirmation. "
-              "Re-run with -y to assert you are authorized.", file=sys.stderr)
-        return False
-    prompt = (f"\nYou are about to scan: {target}\n"
-              "Confirm you are authorized to test this target. Type 'yes' to proceed: ")
-    try:
-        return input(prompt).strip().lower() in ("y", "yes")
-    except (EOFError, KeyboardInterrupt):
-        return False
 
 
 def _select_web_modules(requested) -> list[str]:
@@ -157,10 +139,6 @@ def run_scan(args) -> int:
     ui = LopataUI(enabled=not args.no_ui)
     ui.banner(target, __version__)
     print(f"! {DISCLAIMER}\n")
-
-    if not _consent(target, args.yes, ui):
-        print("Authorization not confirmed. Aborting.", file=sys.stderr)
-        return 1
 
     logger = get_logger(logfile=args.logfile, verbose=args.verbose)
     notes = getattr(logger, "_note_collector", None)

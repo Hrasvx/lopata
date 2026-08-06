@@ -10,10 +10,9 @@ colourful console UI while it runs.
 
 > ⚠️ **Authorized testing only.** lopata is for security testing of systems you
 > **own** or have **explicit written permission** to test. Unauthorized
-> scanning may be illegal and unethical. lopata asks you to confirm
-> authorization before every scan and identifies itself honestly in the
-> target's logs (`User-Agent: lopata/1.0`). You are responsible for how you use
-> it.
+> scanning may be illegal and unethical. lopata identifies itself honestly in
+> the target's logs (`User-Agent: lopata/1.0`). You are responsible for how you
+> use it.
 
 ---
 

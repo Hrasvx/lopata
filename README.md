@@ -1,4 +1,4 @@
-<h1 align=center>lopata</h1>
+
 <p align="center"><img width="700" src="lopata.png" alt="description" /></p>
 A CLI defensive web-application vulnerability scanner, written in Python and
 built for **Alpine Linux**. lopata does its own web-layer testing (XSS, SQLi,

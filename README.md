@@ -49,19 +49,23 @@ python3 -m venv .venv
 ## External tools
 
 lopata detects each with `shutil.which` at runtime; if a tool is absent the
-corresponding phase is skipped and noted in the report. Install what you want:
+corresponding phase is skipped and noted in the report. **`./install.sh`
+installs all of these for you** — the table below documents what it does under
+the hood, since only some are packaged in the Alpine repos.
 
-| Tool | Purpose in lopata | Install on Alpine |
-|------|-------------------|-------------------|
+| Tool | Purpose in lopata | How install.sh gets it on Alpine 3.24 |
+|------|-------------------|----------------------------------------|
 | **nmap** | port/service discovery, `-sV`, `--script vuln` recon | `apk add nmap nmap-scripts` |
-| **nikto** | server misconfig / known-vulnerable files | `apk add nikto` |
-| **sslyze** *or* **testssl.sh** | TLS protocol/cipher/cert checks | `pip install sslyze` / `apk add testssl.sh` |
-| **whatweb** *or* wappalyzer-cli | tech-stack fingerprint (informs which checks run) | `apk add whatweb` |
-| **subfinder** *or* amass | passive subdomain enumeration | `apk add subfinder` |
+| **nikto** | server misconfig / known-vulnerable files | `apk add nikto` (as `nikto.pl`) **plus its perl deps** `perl-xml-writer perl-json perl-net-ssleay perl-crypt-ssleay perl-io-socket-ssl`, or it errors at runtime |
+| **sslyze** *or* **testssl.sh** | TLS protocol/cipher/cert checks | sslyze is `pip install`ed into the venv (primary); testssl.sh is `git clone`d as a fallback — neither is in apk |
+| **whatweb** | tech-stack fingerprint (informs which checks run) | **not a RubyGem / not in apk** — `git clone` from GitHub + the Ruby ≥3.4 runtime gems it needs (`getoptlong resolv resolv-replace ipaddr addressable json`) |
+| **subfinder** *or* amass | passive subdomain enumeration | **not in apk** — built with `go install` (install.sh adds `go` if missing) |
 
-Custom Python logic is reserved for what these tools don't cover well: XSS/SQLi
-payload injection with response diffing, CSRF token checks, cookie flags, CORS
-misconfig, and open-redirect detection.
+Tools not in the Alpine repos are symlinked into `/usr/local/bin` after install
+so lopata's runtime detection finds them. Custom Python logic is reserved for
+what these tools don't cover well: XSS/SQLi payload injection with response
+diffing, CSRF token checks, cookie flags, CORS misconfig, and open-redirect
+detection.
 
 ---
 

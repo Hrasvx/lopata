@@ -130,6 +130,3 @@ lopata/
     └── report/
 ```
 
-## License
-
-MIT.

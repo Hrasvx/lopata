@@ -4,6 +4,8 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
+from contextlib import contextmanager
 from urllib.parse import urlparse
 
 from ..core.models import ToolInfo
@@ -59,6 +61,46 @@ def run_tool(argv: list[str], timeout: int, logger=None) -> subprocess.Completed
     except Exception as exc:
         logger and logger.warning("tool failed: %s (%s)", argv[0], exc)
     return None
+
+
+@contextmanager
+def temp_output(suffix: str = ".json"):
+    """Give a tool a private directory to write its report into.
+
+    Several tools do not honour "-" as "write to stdout" (nikto and testssl.sh
+    both take it as a literal filename and litter the working directory), and
+    they disagree about whether they append their own extension to the path
+    they were given — nikto will happily produce "out.json.json". Handing over
+    an empty directory and reading back whatever appeared in it sidesteps all
+    of that, and cleans up afterwards either way.
+
+    Yields ``(path, read)`` where ``read()`` returns the file contents, or ""
+    if the tool wrote nothing.
+    """
+    directory = tempfile.mkdtemp(prefix="lopata-")
+    path = os.path.join(directory, "output" + suffix)
+
+    def read() -> str:
+        try:
+            names = sorted(os.listdir(directory))
+        except OSError:
+            return ""
+        for name in names:
+            candidate = os.path.join(directory, name)
+            try:
+                if os.path.getsize(candidate) == 0:
+                    continue
+                with open(candidate, "r", encoding="utf-8",
+                          errors="replace") as fh:
+                    return fh.read()
+            except OSError:
+                continue
+        return ""
+
+    try:
+        yield path, read
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def host_of(target: str) -> str:

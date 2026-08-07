@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import time
 from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -9,7 +8,10 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 import requests
 
 from ..core.baseline import similarity
-from ..core.models import Confidence, Finding, Severity
+from ..core.models import (AREA_WEBAPP, Confidence, Effort, Finding,
+                           FindingType, Severity)
+from ..core.severity import (AuthRequirement, Exploitability, Exposure, Impact,
+                             SeverityFactors, apply)
 
 MODULE_NAME = "sqli"
 CATEGORY = "SQL Injection"
@@ -36,6 +38,66 @@ TIME_PAYLOADS = [
 TIME_CONTROL = "' OR SLEEP(0)-- -"
 
 Target = namedtuple("Target", "method url param data")
+
+
+_RISK = (
+    "User-supplied input reaches the SQL query as code rather than as data. "
+    "The database cannot tell the difference between the developer's query "
+    "structure and the attacker's addition to it."
+)
+_IMPACT = (
+    "Read access to every table the application's database user can reach — "
+    "which in most deployments is all of them, including password hashes and "
+    "personal data. Where the account has write or file privileges it extends "
+    "to modifying records, and on MySQL/MSSQL frequently to reading local "
+    "files or executing commands on the database host."
+)
+_STEPS = [
+    "Replace string concatenation with parameterised queries (prepared "
+    "statements) — bind every user-supplied value, without exception.",
+    "Where an identifier (table or column name) must be dynamic, map it "
+    "through a fixed allow-list; identifiers cannot be parameterised.",
+    "Reduce the database account's privileges to what the application "
+    "actually needs: no FILE, no administrative rights, no DDL in production.",
+    "Audit the rest of the codebase for the same pattern — a single "
+    "vulnerable query is almost never the only one.",
+    "Add a WAF rule as a temporary shield while the code fix is developed, "
+    "not as the fix itself.",
+]
+_REFS = [
+    "https://cheatsheetseries.owasp.org/cheatsheets/"
+    "SQL_Injection_Prevention_Cheat_Sheet.html",
+]
+
+
+def _sqli_finding(name, loc, target, summary, description, evidence, request,
+                  technique, verification):
+    finding = Finding(
+        name=name, severity=Severity.INFO, location=loc,
+        description=description,
+        remediation=_STEPS[0],
+        ftype=FindingType.CONFIRMED_VULN,
+        module=MODULE_NAME, category=CATEGORY,
+        summary=summary, risk=_RISK, impact=_IMPACT,
+        remediation_steps=_STEPS,
+        verification=verification,
+        references=_REFS,
+        effort=Effort.MODERATE,
+        score_area=AREA_WEBAPP,
+        evidence=evidence,
+        request=request,
+        verified_by=technique,
+        sources=[MODULE_NAME],
+    )
+    apply(finding, SeverityFactors(
+        impact=Impact.TOTAL,
+        exploitability=Exploitability.EASY,
+        auth=AuthRequirement.NONE,
+        exposure=Exposure.PUBLIC,
+        confidence=Confidence.CONFIRMED,
+    ))
+    return finding
+
 
 
 def run(ctx, phase=None) -> None:
@@ -111,33 +173,56 @@ def _test_param(ctx, target: Target) -> list[Finding]:
             continue
         m = _ERROR_SIGNS.search(body)
         if m and not any(_ERROR_SIGNS.search(r) for r in refs):
-            findings.append(Finding(
+            findings.append(_sqli_finding(
                 name="SQL injection (error-based)",
-                severity=Severity.HIGH, location=loc,
-                description=f"Injecting {payload!r} into '{target.param}' triggers "
-                            "a database error absent from the clean and bad-input "
-                            "responses, indicating the input reaches a SQL query.",
-                remediation="Use parameterised queries / prepared statements; "
-                            "never build SQL by string concatenation.",
-                module=MODULE_NAME, category=CATEGORY,
+                loc=loc, target=target,
+                summary=f"`{target.param}` reaches a SQL query unsanitised.",
+                description=(
+                    f"Injecting {payload!r} into `{target.param}` produces a "
+                    "database error message that is absent from both the clean "
+                    "response and a response containing other special "
+                    "characters. The control comparison rules out an error page "
+                    "that appears for any unusual input, so the syntax break is "
+                    "attributable to the injected quote reaching the query."
+                ),
                 evidence=body[max(0, m.start() - 20):m.start() + 120].replace("\n", " "),
                 request=_reqline(target, "lopata" + payload),
-                confidence=Confidence.CONFIRMED))
+                technique="lopata compared the injected response against clean "
+                          "and bad-input controls and found a database error "
+                          "only in the injected case",
+                verification=(
+                    f"Send `{target.param}` with a single quote appended and "
+                    "confirm the database error no longer appears once the "
+                    "query is parameterised."
+                ),
+            ))
             return findings
 
     if _boolean_blind(ctx, target, clean_body):
-        findings.append(Finding(
+        findings.append(_sqli_finding(
             name="SQL injection (boolean-based blind)",
-            severity=Severity.HIGH, location=loc,
-            description=f"A TRUE condition on '{target.param}' returns a page "
-                        "matching the normal response while a FALSE condition "
-                        "returns a materially different one — reproducibly — "
-                        "indicating boolean-based blind SQLi.",
-            remediation="Use parameterised queries; validate and type-check input.",
-            module=MODULE_NAME, category=CATEGORY,
-            evidence="TRUE ~ clean, FALSE diverges (confirmed on retry)",
+            loc=loc, target=target,
+            summary=f"`{target.param}` alters query logic without error output.",
+            description=(
+                f"A condition that is always true (`{BOOL_TRUE}`) injected into "
+                f"`{target.param}` returns a page closely matching the normal "
+                "response, while an always-false condition returns a materially "
+                "different one. The pair was sent twice and behaved identically "
+                "both times, which rules out ordinary page variance.\n\n"
+                "No error message is needed for this to be exploitable: an "
+                "attacker extracts data one bit at a time by asking true/false "
+                "questions about it."
+            ),
+            evidence="TRUE response ~ clean response; FALSE response diverges; "
+                     "reproduced on a second independent attempt",
             request=_reqline(target, BOOL_TRUE),
-            confidence=Confidence.CONFIRMED))
+            technique="lopata compared true/false condition pairs against the "
+                      "clean response and required the pattern to reproduce",
+            verification=(
+                "Send the true and false payloads again after parameterising "
+                "the query; both should now return identical pages."
+            ),
+        ))
         return findings
 
     tf = _time_blind(ctx, target)
@@ -172,19 +257,30 @@ class _TimeHit:
         self.payload, self.delay, self.control = payload, delay, control
 
     def finding(self, loc, target: Target):
-        return Finding(
+        return _sqli_finding(
             name="SQL injection (time-based blind)",
-            severity=Severity.HIGH, location=loc,
-            description=f"A time-delay payload on '{target.param}' delayed the "
-                        f"response to {self.delay:.1f}s (control "
-                        f"{self.control:.1f}s), reproducibly, indicating "
-                        "time-based blind SQLi.",
-            remediation="Use parameterised queries; do not interpolate input into "
-                        "SQL.",
-            module=MODULE_NAME, category=CATEGORY,
-            evidence=f"delay={self.delay:.1f}s vs control={self.control:.1f}s",
+            loc=loc, target=target,
+            summary=f"`{target.param}` can control server-side execution time.",
+            description=(
+                f"A sleep payload injected into `{target.param}` delayed the "
+                f"response to {self.delay:.1f}s, against a control of "
+                f"{self.control:.1f}s using the same payload with a zero-second "
+                "sleep. The delay reproduced on a second attempt and the control "
+                "returned promptly both times, which distinguishes this from "
+                "network jitter or a slow endpoint.\n\n"
+                "The attacker is executing a database function of their choosing "
+                "— the sleep is simply the safest way to demonstrate it."
+            ),
+            evidence=f"injected delay {self.delay:.1f}s vs control "
+                     f"{self.control:.1f}s (both measured twice)",
             request=_reqline(target, self.payload),
-            confidence=Confidence.CONFIRMED)
+            technique="lopata measured response timing against a zero-delay "
+                      "control payload and required both to reproduce",
+            verification=(
+                "Re-send the sleep payload after parameterising the query; the "
+                "response time should match the control."
+            ),
+        )
 
 
 def _time_blind(ctx, target: Target) -> "_TimeHit | None":

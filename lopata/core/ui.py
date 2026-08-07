@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 from collections import Counter
 
-from .models import Confidence, Finding, Severity
+from .models import Confidence, Finding, FindingType, Severity
 
 try:
     from rich.console import Console, Group
@@ -29,6 +29,25 @@ BANNER = r"""
 
 _SEV_ORDER = [Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM,
               Severity.LOW, Severity.INFO]
+_CONF_UI = {
+    Confidence.CONFIRMED: "[green](confirmed)[/]",
+    Confidence.HIGH: "[cyan](high confidence)[/]",
+    Confidence.MEDIUM: "",
+    Confidence.LOW: "[dim](low confidence — lead)[/]",
+    Confidence.INFORMATIONAL: "[dim](inventory)[/]",
+}
+
+# Short tags so the live feed shows what kind of thing was found, not just a
+# severity colour — an open port and an injection flaw should never look alike.
+_TYPE_TAG = {
+    FindingType.CONFIRMED_VULN: "VULN",
+    FindingType.POTENTIAL_VULN: "POSSIBLE",
+    FindingType.MISCONFIGURATION: "MISCONFIG",
+    FindingType.EXPOSURE: "EXPOSURE",
+    FindingType.INVENTORY: "INVENTORY",
+    FindingType.INFORMATIONAL: "INFO",
+}
+
 _SEV_UI = {
     Severity.CRITICAL: ("CRIT", "bold white on red"),
     Severity.HIGH: ("HIGH", "bold red"),
@@ -110,21 +129,16 @@ class LopataUI:
             if not self.enabled:
                 tag = _SEV_UI[finding.severity][0].strip()
                 conf = finding.confidence.label.lower()
-                print(f"    [{tag}] {finding.resolved_category()}: "
+                print(f"    [{tag}] {_TYPE_TAG[finding.ftype]}: "
                       f"{finding.name} @ {finding.location} ({conf})")
                 return
             label, style = _SEV_UI[finding.severity]
-            conf = finding.confidence
-            conf_tag = {
-                Confidence.CONFIRMED: "[green](confirmed)[/]",
-                Confidence.FIRM: "",
-                Confidence.TENTATIVE: "[dim](lead)[/]",
-            }[conf]
+            conf_tag = _CONF_UI[finding.confidence]
             line = Text.assemble(
                 ("  "),
                 (f" {label} ", style),
-                (f" {finding.resolved_category()}", "bold"),
-                (f" — {finding.name} ", "default"),
+                (f" {_TYPE_TAG[finding.ftype]}", "bold"),
+                (f" {finding.name} ", "default"),
                 (f"@ {finding.location}", "dim"),
             )
             self._print(line, extra=conf_tag)
@@ -164,16 +178,37 @@ class LopataUI:
             self.console.print(renderable, extra) if extra else self.console.print(renderable)
 
     def final_summary(self, findings: list[Finding], duration: float,
-                      report_path: str, json_path: str | None) -> None:
+                      report_path: str, json_path: str | None,
+                      scores: dict | None = None) -> None:
+        scores = scores or {}
+        categories = scores.get("categories") or {}
+        # Recount from the final set: self.counts accumulated live, before
+        # correlation merged duplicate observations together.
+        counts = Counter(f.severity for f in findings)
+        confirmed = sum(1 for f in findings
+                        if f.confidence == Confidence.CONFIRMED)
+        actionable = sum(1 for f in findings
+                         if f.severity >= Severity.MEDIUM
+                         and f.confidence >= Confidence.MEDIUM)
+
         if not self.enabled:
             print("\n=== SCAN SUMMARY ===")
             for sev in _SEV_ORDER:
-                print(f"  {_SEV_UI[sev][0].strip():<5} {self.counts.get(sev, 0)}")
+                print(f"  {_SEV_UI[sev][0].strip():<5} {counts.get(sev, 0)}")
             print(f"  TOTAL {len(findings)}   ({duration:.1f}s)")
+            print(f"  {actionable} actionable, {confirmed} confirmed")
+            if scores:
+                print(f"  score: {scores.get('overall')}/100 "
+                      f"(grade {scores.get('grade')})")
+                for area, data in categories.items():
+                    score = data.get("score")
+                    print(f"    {area:<28} "
+                          + (f"{score}/100" if score is not None else "not assessed"))
             print(f"  report: {report_path}")
             if json_path:
                 print(f"  json:   {json_path}")
             return
+
         table = Table(show_header=True, header_style="bold cyan",
                       title="[bold]scan summary", title_style="bold white")
         table.add_column("severity")
@@ -181,15 +216,47 @@ class LopataUI:
         for sev in _SEV_ORDER:
             label, style = _SEV_UI[sev]
             table.add_row(Text(label.strip(), style=style),
-                          str(self.counts.get(sev, 0)))
+                          str(counts.get(sev, 0)))
         table.add_row(Text("TOTAL", style="bold white"),
                       Text(str(len(findings)), style="bold white"))
+
+        renderables = [table]
+        if categories:
+            score_table = Table(show_header=True, header_style="bold cyan",
+                                title="[bold]security score",
+                                title_style="bold white")
+            score_table.add_column("category")
+            score_table.add_column("score", justify="right")
+            score_table.add_column("grade", justify="center")
+            for area, data in categories.items():
+                score = data.get("score")
+                grade = data.get("grade", "—")
+                style = _grade_style(grade)
+                score_table.add_row(
+                    area,
+                    Text(f"{score}/100" if score is not None else "—", style=style),
+                    Text(grade, style=style))
+            score_table.add_row(
+                Text("OVERALL", style="bold white"),
+                Text(f"{scores.get('overall')}/100", style="bold white"),
+                Text(str(scores.get("grade", "—")),
+                     style=_grade_style(scores.get("grade", "—"))))
+            renderables.append(score_table)
+
         self.console.print()
-        self.console.print(table)
-        self.console.print(f"[dim]completed in {duration:.1f}s[/]")
+        for renderable in renderables:
+            self.console.print(renderable)
+        self.console.print(
+            f"[dim]completed in {duration:.1f}s — {actionable} actionable "
+            f"finding(s), {confirmed} confirmed[/]")
         self.console.print(f"[green]✓[/] report: [bold]{report_path}[/]")
         if json_path:
             self.console.print(f"[green]✓[/] json:   [bold]{json_path}[/]")
+
+
+def _grade_style(grade: str) -> str:
+    return {"A": "bold green", "B": "green", "C": "yellow",
+            "D": "red", "F": "bold red"}.get(grade, "dim")
 
 
 class _Phase:

@@ -7,7 +7,10 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import requests
 
-from ..core.models import Confidence, Finding, Severity
+from ..core.models import (AREA_WEBAPP, Confidence, Effort, Finding,
+                           FindingType, Severity)
+from ..core.severity import (AuthRequirement, Exploitability, Exposure, Impact,
+                             SeverityFactors, apply)
 
 MODULE_NAME = "xss"
 CATEGORY = "XSS"
@@ -96,13 +99,17 @@ def _context(body: str, idx: int) -> str:
 
 
 def _classify(context: str, dq: bool, sq: bool):
+    """Reflection alone is not XSS — what matters is whether the characters
+    needed to break out of the surrounding context survived encoding."""
     if context in ("html", "script", "event"):
-        return Severity.HIGH, Confidence.CONFIRMED, True
+        return Confidence.CONFIRMED, True
     if context == "attribute":
         if dq or sq:
-            return Severity.HIGH, Confidence.CONFIRMED, True
-        return Severity.MEDIUM, Confidence.TENTATIVE, False
-    return Severity.MEDIUM, Confidence.TENTATIVE, False
+            # A surviving quote is what turns attribute reflection into
+            # execution; without it, the payload stays inside the value.
+            return Confidence.CONFIRMED, True
+        return Confidence.MEDIUM, False
+    return Confidence.MEDIUM, False
 
 
 def _test_reflected(ctx, url, param) -> Finding | None:
@@ -134,37 +141,111 @@ def _test_reflected(ctx, url, param) -> Finding | None:
         return None
 
     context = _context(test, idx)
-    severity, confidence, exploitable = _classify(context, dq, sq)
+    confidence, exploitable = _classify(context, dq, sq)
 
     if not _retry_confirm(ctx, url, param):
         return None
 
     snippet = test[max(0, idx - 30): idx + len(canary) + 12].replace("\n", " ")
     label = _CTX_LABELS.get(context, context)
-    if exploitable:
-        name = "Reflected XSS"
-        desc = (f"Input to '{param}' is reflected unencoded in {label} context "
-                "(raw '<' and '>'"
-                + (", plus a quote," if (dq or sq) else "")
-                + " survive), allowing script injection in the victim's browser.")
-    else:
-        name = "Reflected input (possible XSS)"
-        desc = (f"Input to '{param}' is reflected unencoded in {label} context. "
-                "Raw angle brackets survive, but reaching script execution needs a "
-                "break-out sequence not verified here — confirm manually.")
 
-    return Finding(
+    if exploitable:
+        name = "Reflected cross-site scripting"
+        ftype = FindingType.CONFIRMED_VULN
+        description = (
+            f"Input supplied in `{param}` is reflected into the response inside "
+            f"{label} with no output encoding: raw `<` and `>` survive"
+            + (", and so does a quote character" if (dq or sq) else "")
+            + ". lopata confirmed the reflection three times with a fresh random "
+              "marker each time, and checked that the marker does not appear in "
+              "the clean or baseline responses, so this is not an artefact of "
+              "page content."
+        )
+        impact = (
+            "An attacker who gets a victim to follow a crafted link executes "
+            "JavaScript in the victim's session on this origin: reading and "
+            "exfiltrating session cookies (unless HttpOnly), performing any "
+            "action the user can perform, rewriting the page to capture "
+            "credentials, and pivoting to any API the origin can reach."
+        )
+        impact_level = Impact.SERIOUS
+        exploitability = Exploitability.EASY
+    else:
+        name = "Unencoded input reflection (possible XSS)"
+        ftype = FindingType.POTENTIAL_VULN
+        description = (
+            f"Input supplied in `{param}` is reflected into {label} with angle "
+            "brackets intact, but the characters needed to break out of the "
+            "surrounding context were encoded or absent. That means the "
+            "reflection is real and unencoded, while script execution has not "
+            "been demonstrated — a manual attempt with a context-appropriate "
+            "payload is needed to settle it."
+        )
+        impact = (
+            "If a break-out sequence exists that lopata did not try, the impact "
+            "is that of reflected XSS: full script execution in the victim's "
+            "session. If not, the reflection is inert."
+        )
+        impact_level = Impact.LIMITED
+        exploitability = Exploitability.MODERATE
+
+    finding = Finding(
         name=name,
-        severity=severity,
+        severity=Severity.INFO,
         location=f"{url} [param: {param}]",
-        description=desc,
-        remediation="Context-aware output encoding on all reflected input; apply "
-                    "a restrictive CSP as defence in depth.",
+        description=description,
+        remediation="Encode output for the context it lands in, at the point of "
+                    "rendering.",
+        ftype=ftype,
         module=MODULE_NAME, category=CATEGORY,
-        evidence=f"[{context}] {snippet}",
+        summary=f"`{param}` is reflected unencoded into {label}.",
+        risk=(
+            "The application places attacker-controlled text into the page "
+            "without encoding it for the context it lands in. The browser cannot "
+            "distinguish that text from the developer's own markup."
+        ),
+        impact=impact,
+        remediation_steps=[
+            f"Encode on output for the {label} context specifically — HTML-entity "
+            "encoding is not sufficient inside a script block or an event "
+            "handler attribute.",
+            "Use the template engine's automatic contextual escaping rather than "
+            "string concatenation; if it is disabled for this value, find out why.",
+            "Never place user input directly into a <script> block; pass it "
+            "through a JSON-encoded data attribute instead.",
+            "Add a Content-Security-Policy without 'unsafe-inline' so that a "
+            "missed case cannot execute.",
+            "Validate input at the boundary as defence in depth — but encode on "
+            "output, because that is where the context is known.",
+        ],
+        verification=(
+            f"Request the URL with `{param}` set to a harmless marker and view "
+            "the page source: the marker should appear entity-encoded "
+            "(`&lt;`/`&gt;`) rather than as raw markup."
+        ),
+        references=[
+            "https://cheatsheetseries.owasp.org/cheatsheets/"
+            "Cross_Site_Scripting_Prevention_Cheat_Sheet.html",
+        ],
+        effort=Effort.MODERATE,
+        score_area=AREA_WEBAPP,
+        evidence=f"[{context} context] {snippet}",
         request=f"GET {_inject(url, param, payload)}",
-        confidence=confidence,
+        response=f"marker reflected at offset {idx} in {label}",
+        verified_by="lopata reproduced the reflection with three independent "
+                    "random markers",
+        sources=[MODULE_NAME],
     )
+    apply(finding, SeverityFactors(
+        impact=impact_level,
+        exploitability=exploitability,
+        auth=AuthRequirement.NONE,
+        exposure=Exposure.PUBLIC,
+        confidence=confidence,
+        notes=["reflected XSS requires the victim to follow an attacker-supplied "
+               "link, which bounds it below stored XSS"],
+    ))
+    return finding
 
 
 def _retry_confirm(ctx, url, param, attempts: int = 2) -> bool:
@@ -220,16 +301,73 @@ def _test_stored(ctx, phase) -> None:
         except requests.RequestException:
             continue
         if raw_signature in body:
-            ctx.add_finding(Finding(
-                name="Stored XSS",
-                severity=Severity.CRITICAL,
+            finding = Finding(
+                name="Stored cross-site scripting",
+                severity=Severity.INFO,
                 location=page,
-                description="An inert marker submitted via a form persisted and "
-                            "was rendered unencoded on this page, indicating "
-                            "stored XSS.",
-                remediation="Encode output on render and validate/sanitise input "
-                            "on storage; apply a restrictive CSP.",
+                description=(
+                    "An inert marker submitted through a form on this site was "
+                    "persisted and later rendered back unencoded on this page. "
+                    "The marker contained angle brackets, and they survived "
+                    "both storage and rendering.\n\n"
+                    "Stored XSS is the most severe variant: no crafted link is "
+                    "needed, and the payload executes for every user who views "
+                    "the affected page, including administrators."
+                ),
+                remediation="Encode on output at render time, and validate on "
+                            "input at storage time.",
+                ftype=FindingType.CONFIRMED_VULN,
                 module=MODULE_NAME, category=CATEGORY,
-                evidence=raw_signature,
-                confidence=Confidence.CONFIRMED))
+                summary="Submitted markup is stored and rendered unencoded.",
+                risk=(
+                    "Any visitor to this page executes attacker-supplied script "
+                    "in their own session, with no interaction beyond viewing "
+                    "the page. Payloads persist until the stored data is cleaned."
+                ),
+                impact=(
+                    "Session theft and full account takeover for every viewer, "
+                    "including staff and administrators — which typically means "
+                    "the highest-privileged account in the application is "
+                    "compromised within a working day. Self-propagating payloads "
+                    "in shared content are a routine outcome."
+                ),
+                remediation_steps=[
+                    "Encode all stored content on output, using the encoding "
+                    "appropriate to where it is rendered.",
+                    "If the field is meant to accept rich text, run it through a "
+                    "vetted HTML sanitiser (DOMPurify, Bleach) with an "
+                    "allow-list — never a regex-based filter.",
+                    "Audit stored data for payloads already present before "
+                    "deploying the fix.",
+                    "Add a Content-Security-Policy without 'unsafe-inline'.",
+                    "Set HttpOnly on session cookies to blunt token theft.",
+                ],
+                verification=(
+                    "Submit a harmless marker containing angle brackets through "
+                    "the same form and confirm it renders as visible text, "
+                    "entity-encoded in the page source."
+                ),
+                references=[
+                    "https://cheatsheetseries.owasp.org/cheatsheets/"
+                    "Cross_Site_Scripting_Prevention_Cheat_Sheet.html",
+                ],
+                effort=Effort.MODERATE,
+                score_area=AREA_WEBAPP,
+                evidence=f"marker {raw_signature} found rendered on {page}",
+                request="POST to the discovered form(s), then GET " + page,
+                response="marker present unencoded in the response body",
+                verified_by="lopata submitted the marker and re-fetched the page "
+                            "to observe it rendered",
+                sources=[MODULE_NAME],
+            )
+            apply(finding, SeverityFactors(
+                impact=Impact.TOTAL,
+                exploitability=Exploitability.EASY,
+                auth=AuthRequirement.NONE,
+                exposure=Exposure.PUBLIC,
+                confidence=Confidence.CONFIRMED,
+                notes=["no user interaction is required beyond viewing the "
+                       "affected page"],
+            ))
+            ctx.add_finding(finding)
             return

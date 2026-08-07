@@ -14,6 +14,24 @@ DEFAULTS = {
     "verify_tls": True,
     "baseline_threshold": 0.92,
 
+    # Content discovery
+    "crawl_depth": 3,
+    "content_discovery": True,
+    "extra_paths": [],
+
+    # External tool tuning
+    "nmap_fast": True,
+    "nmap_vuln": True,
+    "nmap_scripts": "vuln",
+    "nmap_timeout": 300,
+    "nmap_script_timeout": 60,
+    "nikto_maxtime": 120,
+    "nikto_timeout": 240,
+    "ssl_timeout": 180,
+    "whatweb_timeout": 90,
+    "whatweb_aggression": 1,
+    "subfinder_timeout": 120,
+
     "modules": None,
 
     "tools": {

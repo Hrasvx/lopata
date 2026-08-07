@@ -1,9 +1,15 @@
-from . import (clickjacking, cookies, cors, crawler, csrf, exposure, headers,
-               misconfig, open_redirect, sqli, xss)
+from . import (attack_surface, clickjacking, cookies, cors, crawler, csrf,
+               exposure, fingerprint, headers, misconfig, open_redirect, sqli,
+               xss)
 
 
+# name -> (module, requires the crawler to have run first)
+# Order is execution order: discovery and fingerprinting first, so the checks
+# that depend on knowing the stack and the URL inventory can use them.
 MODULES = {
     "crawler": (crawler, False),
+    "fingerprint": (fingerprint, False),
+    "attack_surface": (attack_surface, False),
     "headers": (headers, False),
     "cookies": (cookies, False),
     "clickjacking": (clickjacking, False),

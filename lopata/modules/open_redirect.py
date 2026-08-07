@@ -5,7 +5,10 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import requests
 
-from ..core.models import Confidence, Finding, Severity
+from ..core.models import (AREA_WEBAPP, Confidence, Effort, Finding,
+                           FindingType, Severity)
+from ..core.severity import (AuthRequirement, Exploitability, Exposure, Impact,
+                             SeverityFactors, apply)
 
 MODULE_NAME = "open_redirect"
 CATEGORY = "Open Redirect"
@@ -63,19 +66,72 @@ def _test(ctx, url, params) -> list[Finding]:
         except requests.RequestException:
             continue
         if resp.is_redirect and _is_marker(resp.headers.get("Location")):
-            out.append(Finding(
+            finding = Finding(
                 name="Open redirect",
-                severity=Severity.MEDIUM,
+                severity=Severity.INFO,
                 location=f"{url} [param: {param}]",
-                description=f"Parameter '{param}' accepts an arbitrary external "
-                            "URL as the redirect target, usable for phishing or "
-                            "OAuth token theft on the trusted domain.",
-                remediation="Validate redirect targets against an allow-list of "
-                            "internal paths; permit only relative URLs.",
+                description=(
+                    f"The parameter `{param}` accepts an absolute external URL "
+                    "and the server issues a redirect to it. lopata supplied a "
+                    "host it controls the name of and confirmed the Location "
+                    "header pointed there, so this is reproduced behaviour "
+                    "rather than a pattern match."
+                ),
+                remediation="Only redirect to paths, validated against an "
+                            "allow-list.",
+                ftype=FindingType.CONFIRMED_VULN,
                 module=MODULE_NAME, category=CATEGORY,
+                summary=f"`{param}` redirects to an arbitrary external URL.",
+                risk=(
+                    "The redirect launders the trust in your domain. A phishing "
+                    "link that starts with your hostname passes visual "
+                    "inspection, survives link-preview checks, and is often "
+                    "allow-listed by mail filters that trust the domain."
+                ),
+                impact=(
+                    "Credential phishing with a link that genuinely originates "
+                    "from your site. Where the application is an OAuth or SSO "
+                    "provider, an open redirect on a redirect_uri is a direct "
+                    "path to authorisation-code theft and account takeover."
+                ),
+                remediation_steps=[
+                    "Accept only relative paths: reject any value containing "
+                    "'://', starting with '//', or resolving to a different host.",
+                    "Where external destinations are genuinely needed, keep a "
+                    "server-side allow-list and pass an index or key, never a URL.",
+                    "Resolve the final URL server-side and re-check the host "
+                    "after parsing — attackers use backslashes, encoded "
+                    "characters and userinfo tricks to slip past naive checks.",
+                    "For OAuth flows, require exact-match registered redirect "
+                    "URIs with no wildcards.",
+                ],
+                verification=(
+                    f"Request the URL with `{param}=https://example.org/` and "
+                    "confirm the response is not a redirect to example.org."
+                ),
+                references=[
+                    "https://cheatsheetseries.owasp.org/cheatsheets/"
+                    "Unvalidated_Redirects_and_Forwards_Cheat_Sheet.html",
+                ],
+                effort=Effort.EASY,
+                score_area=AREA_WEBAPP,
                 evidence=f"Location -> {resp.headers.get('Location')}",
                 request=f"GET {test_url}",
-                response=f"{resp.status_code} Location: {resp.headers.get('Location')}",
-                confidence=Confidence.CONFIRMED))
+                response=f"{resp.status_code} Location: "
+                         f"{resp.headers.get('Location')}",
+                verified_by="lopata followed the parameter and read the "
+                            "Location header back",
+                sources=[MODULE_NAME],
+            )
+            apply(finding, SeverityFactors(
+                impact=Impact.LIMITED,
+                exploitability=Exploitability.EASY,
+                auth=AuthRequirement.NONE,
+                exposure=Exposure.PUBLIC,
+                confidence=Confidence.CONFIRMED,
+                notes=["impact depends on user interaction: the victim must "
+                       "follow the crafted link"],
+            ))
+            out.append(finding)
             break
     return out

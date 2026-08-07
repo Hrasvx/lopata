@@ -11,10 +11,12 @@ import requests
 from . import __version__
 from .core import baseline as baseline_mod
 from .core import checkpoint as ckpt
+from .core import correlate as correlate_mod
+from .core import scoring
 from .core.config import load_config
 from .core.http import build_session, normalize_target, parse_auth_args
 from .core.logging_setup import get_logger
-from .core.models import ScanContext
+from .core.models import Confidence, ScanContext, Severity
 from .core.ui import LopataUI
 from .integrations import INTEGRATIONS
 from .modules import MODULES
@@ -78,6 +80,22 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Write a detailed log to this file.")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="Verbose logging.")
+    p.add_argument("--min-severity", default=None,
+                   choices=["info", "low", "medium", "high", "critical"],
+                   help="Only report findings at or above this severity.")
+    p.add_argument("--min-confidence", default=None,
+                   choices=["informational", "low", "medium", "high",
+                            "confirmed"],
+                   help="Only report findings at or above this confidence.")
+    p.add_argument("--category", default=None, metavar="NAME[,NAME...]",
+                   help="Only report findings in these categories "
+                        "(case-insensitive substring match).")
+    p.add_argument("--only-vulns", action="store_true",
+                   help="Report only confirmed and potential vulnerabilities, "
+                        "omitting misconfigurations, exposures and inventory.")
+    p.add_argument("--no-correlate", action="store_true",
+                   help="Skip the correlation pass (keeps every raw "
+                        "observation separate; useful when debugging).")
     p.add_argument("--no-ui", action="store_true",
                    help="Disable the rich live UI (plain output).")
     p.add_argument("--version", action="version", version=f"lopata {__version__}")
@@ -110,6 +128,34 @@ def _select_tools(args, cfg) -> list[str]:
                              f"valid: {', '.join(INTEGRATIONS)}")
         return [t for t in INTEGRATIONS if t in chosen]
     return list(INTEGRATIONS)
+
+
+
+def _apply_filters(ctx, args) -> int:
+    """Drop findings the user asked not to see.
+
+    Filtering happens after scoring, so hiding low-severity noise never
+    flatters the score — the numbers still reflect everything that was found.
+    """
+    findings = ctx.findings
+    keep = list(findings)
+
+    if args.min_severity:
+        floor = Severity.from_name(args.min_severity)
+        keep = [f for f in keep if f.severity >= floor]
+    if args.min_confidence:
+        floor = Confidence[args.min_confidence.upper()]
+        keep = [f for f in keep if f.confidence >= floor]
+    if args.category:
+        wanted = [c.strip().lower() for c in args.category.split(",") if c.strip()]
+        keep = [f for f in keep
+                if any(w in f.resolved_category().lower() for w in wanted)]
+    if args.only_vulns:
+        keep = [f for f in keep if f.is_vulnerability]
+
+    dropped = len(findings) - len(keep)
+    ctx.findings = keep
+    return dropped
 
 
 def run_scan(args) -> int:
@@ -187,7 +233,8 @@ def run_scan(args) -> int:
         if completed:
             logger.info("resuming; %d phase(s) already done", len(completed))
 
-    phase_count = len(tools) + len(web_modules) + 1
+    # tools + baseline + web modules + correlation
+    phase_count = len(tools) + len(web_modules) + 2
     ui.start(phase_count)
     started = datetime.datetime.now(datetime.timezone.utc)
     t0 = time.perf_counter()
@@ -243,6 +290,32 @@ def run_scan(args) -> int:
         ckpt.save(ctx, cp_path, completed)
         ui.advance_overall()
 
+    # Correlation runs across every module's output at once: it merges
+    # duplicate observations, raises confidence where independent sources
+    # agree, lowers it where a lone tool is the only voice, and re-derives
+    # severity afterwards because confidence caps severity.
+    if not args.no_correlate:
+        cph = ui.phase("correlating findings", total=1)
+        raw_count = len(ctx.findings)
+        try:
+            correlate_mod.correlate(ctx, logger)
+        except Exception as exc:
+            logger.warning("correlation failed: %s", exc)
+        cph.done()
+        if raw_count != len(ctx.findings):
+            ui.note(f"correlation: {raw_count} observation(s) -> "
+                    f"{len(ctx.findings)} finding(s)")
+    ui.advance_overall()
+
+    try:
+        scoring.compute(ctx)
+    except Exception as exc:
+        logger.warning("scoring failed: %s", exc)
+
+    dropped = _apply_filters(ctx, args)
+    if dropped:
+        ui.note(f"{dropped} finding(s) hidden by report filters")
+
     duration = time.perf_counter() - t0
     finished = datetime.datetime.now(datetime.timezone.utc)
     ui.stop()
@@ -276,7 +349,8 @@ def run_scan(args) -> int:
             json_path = None
 
     ui.final_summary(ctx.findings, duration, os.path.abspath(out),
-                     os.path.abspath(json_path) if json_path else None)
+                     os.path.abspath(json_path) if json_path else None,
+                     ctx.scores)
 
     ckpt.clear(cp_path)
     return 0

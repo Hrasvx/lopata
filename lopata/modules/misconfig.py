@@ -5,8 +5,11 @@ from urllib.parse import urljoin
 
 import requests
 
-from ..core.baseline import ResponseSnapshot, similarity
-from ..core.models import Confidence, Finding, Severity
+from ..core.baseline import ResponseSnapshot
+from ..core.models import (AREA_CONFIG, Confidence, Effort, Finding,
+                           FindingType, Severity)
+from ..core.severity import (AuthRequirement, Exploitability, Exposure, Impact,
+                             SeverityFactors, apply)
 
 MODULE_NAME = "misconfig"
 CATEGORY = "Server Misconfiguration"
@@ -61,19 +64,64 @@ def _verbose_errors(ctx, baseline) -> None:
             snap = ResponseSnapshot.capture(resp)
             if baseline is not None and baseline.looks_like_not_found(snap):
                 continue
-            ctx.add_finding(Finding(
+            finding = Finding(
                 name=f"Verbose error disclosure ({label})",
-                severity=Severity.MEDIUM, location=url,
-                description=f"The server returned a {label} in the response body. "
-                            "Stack traces reveal file paths, framework versions "
-                            "and query structure useful to an attacker.",
-                remediation="Disable debug mode in production; return generic "
-                            "error pages and log details server-side only.",
+                severity=Severity.INFO, location=url,
+                description=(
+                    f"The server returned a {label} in the response body when "
+                    "sent a deliberately malformed request. Debug output of this "
+                    "kind is produced by a framework running with development "
+                    "settings enabled in production."
+                ),
+                remediation="Disable debug mode and return generic error pages.",
+                ftype=FindingType.MISCONFIGURATION,
                 module=MODULE_NAME, category=CATEGORY,
+                summary=f"A {label} is rendered to unauthenticated visitors.",
+                risk=(
+                    "Stack traces hand an attacker the internal file layout, "
+                    "framework and library versions, the shape of the query that "
+                    "failed, and frequently fragments of configuration or "
+                    "credentials. Some debug pages (Werkzeug, Laravel Ignition) "
+                    "go further and expose an interactive console or the full "
+                    "environment."
+                ),
+                impact=(
+                    "Reconnaissance that turns blind probing into targeted "
+                    "attack. Where the debug page includes a console or "
+                    "environment dump, the impact rises to direct compromise."
+                ),
+                remediation_steps=[
+                    "Turn off debug mode in the production environment "
+                    "(`DEBUG=False` in Django, `APP_DEBUG=false` in Laravel, "
+                    "`display_errors=Off` in PHP).",
+                    "Configure a generic error page for 4xx and 5xx responses.",
+                    "Log the detail server-side, where only operators can read it.",
+                    "Verify the setting is enforced by the deployment "
+                    "configuration, not just by a local .env file.",
+                ],
+                verification=(
+                    "Re-send the malformed request shown below; the response "
+                    "should be a generic error page with no trace."
+                ),
+                references=[
+                    "https://owasp.org/www-project-web-security-testing-guide/",
+                ],
+                effort=Effort.EASY,
+                score_area=AREA_CONFIG,
                 evidence=body[max(0, m.start() - 40):m.start() + 160].replace("\n", " "),
                 request=f"GET {url}",
                 response=f"HTTP {resp.status_code}",
-                confidence=Confidence.CONFIRMED))
+                verified_by="lopata triggered the error and read the trace back",
+                sources=[MODULE_NAME],
+            )
+            apply(finding, SeverityFactors(
+                impact=Impact.INFORMATION,
+                exploitability=Exploitability.EASY,
+                auth=AuthRequirement.NONE,
+                exposure=Exposure.PUBLIC,
+                confidence=Confidence.CONFIRMED,
+            ))
+            ctx.add_finding(finding)
             break
 
 
@@ -103,15 +151,58 @@ def _directory_listing(ctx, baseline) -> None:
         snap = ResponseSnapshot.capture(resp)
         if baseline is not None and baseline.looks_like_not_found(snap):
             continue
-        ctx.add_finding(Finding(
+        finding = Finding(
             name="Directory listing enabled",
-            severity=Severity.MEDIUM, location=target,
-            description="The server returns an automatic index of directory "
-                        "contents, exposing file names an attacker can harvest.",
-            remediation="Disable auto-indexing (e.g. 'Options -Indexes' in "
-                        "Apache, 'autoindex off' in nginx).",
+            severity=Severity.INFO, location=target,
+            description=(
+                "The server generated an index of this directory's contents "
+                "instead of returning 403. Everything in the directory is "
+                "therefore enumerable, including files that are not linked from "
+                "anywhere on the site."
+            ),
+            remediation="Disable automatic directory indexing.",
+            ftype=FindingType.MISCONFIGURATION,
             module=MODULE_NAME, category=CATEGORY,
-            evidence=body[:200].replace("\n", " "),
+            summary=f"Directory contents are listed at {target}.",
+            risk=(
+                "Attackers harvest listings for exactly the files that are never "
+                "linked: editor backups, database dumps left after a migration, "
+                "old copies of configuration, and staging artefacts. It removes "
+                "the guesswork from finding them."
+            ),
+            impact=(
+                "Discovery of unlinked files, which frequently leads directly to "
+                "credential or source-code disclosure. The listing itself also "
+                "reveals naming conventions useful elsewhere in the application."
+            ),
+            remediation_steps=[
+                "Apache: `Options -Indexes` for the directory (or globally).",
+                "nginx: ensure `autoindex off;` (the default) is not overridden.",
+                "Place an empty index.html in directories that must stay served.",
+                "Separately, move anything in the directory that should not be "
+                "public out of the web root — hiding the listing is not the same "
+                "as protecting the files.",
+            ],
+            verification=f"`curl -s {target}` should return 403 or an index page, "
+                         "not a file listing.",
+            references=[
+                "https://owasp.org/www-community/attacks/Forced_browsing",
+            ],
+            effort=Effort.TRIVIAL,
+            score_area=AREA_CONFIG,
+            evidence=body[:300].replace("\n", " "),
             request=f"GET {target}",
-            response=f"HTTP 200 directory index",
-            confidence=Confidence.CONFIRMED))
+            response="HTTP 200 with a generated directory index",
+            verified_by="lopata requested the directory and parsed the index page",
+            sources=[MODULE_NAME],
+        )
+        apply(finding, SeverityFactors(
+            # Not merely informational: a listing reliably surfaces files that
+            # are deliberately unlinked, which is where the real damage is.
+            impact=Impact.LIMITED,
+            exploitability=Exploitability.EASY,
+            auth=AuthRequirement.NONE,
+            exposure=Exposure.PUBLIC,
+            confidence=Confidence.CONFIRMED,
+        ))
+        ctx.add_finding(finding)

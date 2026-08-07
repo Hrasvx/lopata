@@ -11,9 +11,16 @@ verify_tls: true
 # risks masking a real hit on very templated sites).
 baseline_threshold: 0.92
 
+# Content discovery. crawl_depth bounds how far links are followed from the
+# seeds; robots.txt, sitemap.xml and endpoints mined out of JavaScript are all
+# seeded at depth 1 regardless.
+crawl_depth: 3
+content_discovery: true    # probe the built-in admin/API/directory wordlist
+extra_paths: []            # additional paths to probe, relative to the target
+
 # Which web-layer modules to run. null == all.
-# Choices: crawler, headers, cookies, clickjacking, cors, exposure, misconfig,
-#          redirect, csrf, xss, sqli
+# Choices: crawler, fingerprint, attack_surface, headers, cookies,
+#          clickjacking, cors, exposure, misconfig, redirect, csrf, xss, sqli
 modules: null
 
 # External tool integrations. Set false to skip a tool even if installed.
@@ -27,7 +34,8 @@ tools:
 # Per-tool tuning (optional).
 nmap_fast: true       # top-100 ports only
 nmap_vuln: true       # run --script vuln
-nmap_timeout: 300
+nmap_timeout: 300        # overall budget; nmap is told to stop 30s earlier
+nmap_script_timeout: 60  # per-NSE-script cap, so one slow script can't eat it
 nikto_maxtime: 120
 nikto_timeout: 240
 ssl_timeout: 180

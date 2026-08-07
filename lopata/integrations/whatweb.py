@@ -1,12 +1,55 @@
+"""whatweb / wappalyzer integration.
+
+Feeds the technology registry rather than emitting findings. Fingerprints are
+inventory: the Technology Summary section presents them, and the patch-review
+logic decides whether any of them is worth reporting on.
+"""
+
 from __future__ import annotations
 
 import json
 
-from ..core.models import Confidence, Finding, Severity
+from ..core.models import Confidence, Technology
 from .base import detect, run_tool
 
 MODULE_NAME = "whatweb"
-CATEGORY = "Tech Fingerprint"
+CATEGORY = "Technology Fingerprint"
+
+# whatweb plugin names mapped onto the categories the report groups by.
+_CATEGORIES = {
+    "CMS": ("wordpress", "joomla", "drupal", "typo3", "magento", "shopify",
+            "ghost", "prestashop", "opencart", "umbraco", "sitecore",
+            "contentful", "craftcms", "concrete5", "silverstripe"),
+    "Framework": ("laravel", "symfony", "django", "rails", "ruby-on-rails",
+                  "express", "spring", "asp.net", "codeigniter", "flask",
+                  "next.js", "nuxt.js", "angular", "react", "vue.js", "svelte",
+                  "struts", "zend", "yii", "phalcon"),
+    "Web Server": ("apache", "nginx", "iis", "lighttpd", "caddy", "openresty",
+                   "litespeed", "tomcat", "jetty", "gunicorn", "uwsgi"),
+    "Language": ("php", "python", "ruby", "java", "perl", "asp", "node.js",
+                 "jsp", "coldfusion"),
+    "CDN / Proxy": ("cloudflare", "cloudfront", "akamai", "fastly", "varnish",
+                    "incapsula", "sucuri", "keycdn", "stackpath", "bunnycdn"),
+    "WAF": ("mod_security", "modsecurity", "cloudflare-waf", "wordfence",
+            "sucuri-waf", "imperva", "barracuda", "f5-big-ip"),
+    "JavaScript Library": ("jquery", "bootstrap", "modernizr", "lodash",
+                           "underscore", "moment.js", "d3", "backbone",
+                           "ember", "prototype", "requirejs", "handlebars"),
+    "Analytics": ("google-analytics", "matomo", "piwik", "hotjar", "segment",
+                  "mixpanel", "gtm", "google-tag-manager"),
+}
+
+_NOISE = {"country", "ip", "title", "http_server_header", "uncommonheaders",
+          "html5", "script", "meta-author", "email", "cookies", "x-ua-compatible"}
+
+
+def classify(name: str) -> str:
+    key = name.strip().lower().replace(" ", "-")
+    for category, members in _CATEGORIES.items():
+        for member in members:
+            if member in key:
+                return category
+    return "Other"
 
 
 def available(ctx):
@@ -14,8 +57,7 @@ def available(ctx):
     if info.available:
         info.note = "whatweb"
         return info
-    enabled = ctx.config.get("tools", {}).get("whatweb", True)
-    if enabled:
+    if ctx.config.get("tools", {}).get("whatweb", True):
         from .base import which
         path = which("wappalyzer")
         if path:
@@ -32,34 +74,35 @@ def run(ctx, phase=None) -> None:
         return
     ctx.modules_run.append(MODULE_NAME)
     if info.note == "wappalyzer":
-        techs = _run_wappalyzer(ctx, info)
+        entries = _run_wappalyzer(ctx, info)
     else:
-        techs = _run_whatweb(ctx, info)
+        entries = _run_whatweb(ctx, info)
     phase and phase.done()
 
-    if techs:
-        ctx.config.setdefault("tech", set()).update(t.lower() for t in techs)
-        ctx.add_finding(Finding(
-            name="Technology fingerprint",
-            severity=Severity.INFO, location=ctx.target,
-            description="Detected stack: " + ", ".join(sorted(techs)),
-            remediation=(
-                "Ensure version banners are not more revealing than necessary; "
-                "keep all detected components patched."
-            ),
-            module=MODULE_NAME, category=CATEGORY,
-            evidence=", ".join(sorted(techs))[:800],
-            confidence=Confidence.FIRM,
+    for name, version, evidence in entries:
+        if name.strip().lower() in _NOISE:
+            continue
+        ctx.add_technology(Technology(
+            name=name.strip(), version=version.strip(),
+            category=classify(name), sources=[MODULE_NAME],
+            # A fingerprint is an observation about what is running; it is not
+            # a claim that anything is wrong, so it never carries more than
+            # medium confidence on its own.
+            confidence=Confidence.MEDIUM,
+            evidence=evidence[:200],
         ))
 
 
-def _run_whatweb(ctx, info) -> set[str]:
-    argv = [info.path, "--log-json=-", "--no-errors", "-a", "1", ctx.target]
+def _run_whatweb(ctx, info) -> list[tuple[str, str, str]]:
+    argv = [info.path, "--log-json=-", "--no-errors", "-a",
+            str(ctx.config.get("whatweb_aggression", 1)), ctx.target]
     proc = run_tool(argv, timeout=int(ctx.config.get("whatweb_timeout", 90)),
                     logger=ctx.logger)
     if proc is None or not proc.stdout.strip():
-        return set()
-    techs: set[str] = set()
+        return []
+    ctx.add_raw_output("whatweb", proc.stdout)
+
+    out: list[tuple[str, str, str]] = []
     for line in proc.stdout.splitlines():
         line = line.strip()
         if not line.startswith("{"):
@@ -69,25 +112,35 @@ def _run_whatweb(ctx, info) -> set[str]:
         except json.JSONDecodeError:
             continue
         for name, meta in (obj.get("plugins") or {}).items():
-            versions = meta.get("version") if isinstance(meta, dict) else None
-            if versions:
-                techs.add(f"{name} {'/'.join(map(str, versions))}")
-            else:
-                techs.add(name)
-    return techs
+            version = ""
+            evidence = name
+            if isinstance(meta, dict):
+                versions = meta.get("version") or []
+                if versions:
+                    version = "/".join(str(v) for v in versions)
+                strings = meta.get("string") or []
+                if strings:
+                    evidence = f"{name}: {'; '.join(str(s) for s in strings[:2])}"
+            out.append((name, version, evidence))
+    return out
 
 
-def _run_wappalyzer(ctx, info) -> set[str]:
+def _run_wappalyzer(ctx, info) -> list[tuple[str, str, str]]:
     proc = run_tool([info.path, ctx.target], timeout=90, logger=ctx.logger)
     if proc is None or not proc.stdout.strip():
-        return set()
+        return []
+    ctx.add_raw_output("wappalyzer", proc.stdout)
     try:
         data = json.loads(proc.stdout)
     except json.JSONDecodeError:
-        return set()
-    techs = set()
-    for t in data.get("technologies", []):
-        name = t.get("name")
-        version = t.get("version")
-        techs.add(f"{name} {version}".strip() if version else name)
-    return {t for t in techs if t}
+        return []
+    out = []
+    for tech in data.get("technologies", []):
+        name = tech.get("name")
+        if not name:
+            continue
+        categories = tech.get("categories") or []
+        label = categories[0].get("name", "") if categories else ""
+        out.append((name, str(tech.get("version") or ""),
+                    f"wappalyzer: {label}".strip(": ")))
+    return out

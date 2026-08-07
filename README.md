@@ -5,8 +5,7 @@ built for **Alpine Linux**. lopata does its own web-layer testing (XSS, SQLi,
 CSRF, headers, CORS, open redirect, exposed files, cookies, clickjacking,
 server misconfig) and orchestrates established external tools for the parts they
 already solve well (nmap, nikto, sslyze/testssl.sh, whatweb, subfinder). Every
-finding lands in one unified report — PDF and optional JSON — with a live,
-colourful console UI while it runs.
+finding is exported into a pdf.
 
 > ⚠️ **Authorized testing only.** lopata is for security testing of systems you
 > **own** or have **explicit written permission** to test. Unauthorized

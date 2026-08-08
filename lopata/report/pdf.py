@@ -40,11 +40,11 @@ _GRADE_HEX = {"A": "#15803d", "B": "#65a30d", "C": "#ca8a04",
               "D": "#ea580c", "F": "#b91c1c", "—": "#94a3b8"}
 
 
-def default_report_name(target: str) -> str:
+def default_report_name(target: str, ext: str = "pdf") -> str:
     host = target.replace("https://", "").replace("http://", "").strip("/")
     host = host.replace("/", "_").replace(":", "_")
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"lopata_report_{host}_{ts}.pdf"
+    return f"lopata_report_{host}_{ts}.{ext.lstrip('.')}"
 
 
 def _styles():

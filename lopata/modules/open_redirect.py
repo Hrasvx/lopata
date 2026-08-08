@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import asyncio
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
-import requests
-
+from ..core import async_http
+from ..core.async_http import AsyncFetcher
 from ..core.models import (AREA_WEBAPP, Confidence, Effort, Finding,
                            FindingType, Severity)
 from ..core.severity import (AuthRequirement, Exploitability, Exposure, Impact,
@@ -31,15 +31,16 @@ def run(ctx, phase=None) -> None:
 
     if phase:
         phase.set_total(len(targets))
-    found = 0
-    with ThreadPoolExecutor(max_workers=ctx.threads) as pool:
-        futures = {pool.submit(_test, ctx, url, names): url
-                   for url, names in targets}
-        for fut in as_completed(futures):
-            for finding in fut.result():
-                ctx.add_finding(finding)
-                found += 1
-            phase and phase.step()
+
+    async def _driver():
+        async with AsyncFetcher.from_ctx(ctx) as fetcher:
+            async def one(url, names):
+                for finding in await _test(ctx, fetcher, url, names):
+                    ctx.add_finding(finding)
+                phase and phase.step()
+            await asyncio.gather(*(one(url, names) for url, names in targets))
+
+    async_http.run(_driver())
     phase and phase.done()
 
 
@@ -52,7 +53,7 @@ def _is_marker(location: str | None) -> bool:
     return (urlparse(target).hostname or "").lower() == MARKER_HOST
 
 
-def _test(ctx, url, params) -> list[Finding]:
+async def _test(ctx, fetcher, url, params) -> list[Finding]:
     out = []
     parsed = urlparse(url)
     base = parse_qs(parsed.query, keep_blank_values=True)
@@ -60,10 +61,8 @@ def _test(ctx, url, params) -> list[Finding]:
         mutated = {k: v[:] for k, v in base.items()}
         mutated[param] = [MARKER_URL]
         test_url = urlunparse(parsed._replace(query=urlencode(mutated, doseq=True)))
-        try:
-            resp = ctx.session.get(test_url, timeout=ctx.timeout,
-                                   allow_redirects=False)
-        except requests.RequestException:
+        resp = await fetcher.get(test_url, allow_redirects=False)
+        if resp is None:
             continue
         if resp.is_redirect and _is_marker(resp.headers.get("Location")):
             finding = Finding(
@@ -135,3 +134,8 @@ def _test(ctx, url, params) -> list[Finding]:
             out.append(finding)
             break
     return out
+
+
+def register():
+    from ..core.plugins import web_module
+    return web_module('redirect', run, requires_crawl=True, order=90)

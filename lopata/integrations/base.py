@@ -103,6 +103,24 @@ def temp_output(suffix: str = ".json"):
         shutil.rmtree(directory, ignore_errors=True)
 
 
+@contextmanager
+def temp_input(text: str, suffix: str = ".txt"):
+    """Write ``text`` to a private temp file and yield its path.
+
+    Several of the newer tools (nuclei, ffuf, dalfox) take a list of targets or
+    a wordlist from a file rather than stdin; this hands them one and removes it
+    afterwards regardless of outcome.
+    """
+    directory = tempfile.mkdtemp(prefix="lopata-in-")
+    path = os.path.join(directory, "input" + suffix)
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        yield path
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
 def host_of(target: str) -> str:
     return urlparse(target).hostname or target
 

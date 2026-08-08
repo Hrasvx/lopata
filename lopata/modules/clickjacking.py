@@ -184,3 +184,8 @@ def _weak_only_xfo(ctx, url, xfo) -> None:
         confidence=Confidence.HIGH,
     ))
     ctx.add_finding(finding)
+
+
+def register():
+    from ..core.plugins import web_module
+    return web_module('clickjacking', run, requires_crawl=False, order=50)

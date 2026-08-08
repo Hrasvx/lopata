@@ -360,11 +360,18 @@ class ScanContext:
     services: list[Service] = field(default_factory=list)
     # Client-side routes recovered from JavaScript bundles (SPA targets).
     spa_routes: list[str] = field(default_factory=list)
+    # Hosts confirmed to be answering HTTP (populated by httpx); used to avoid
+    # scanning subdomains that only resolve in DNS but serve nothing.
+    live_hosts: set[str] = field(default_factory=set)
+    # Hidden HTTP parameters found by Arjun, keyed by the URL they belong to.
+    # Fed to the injection-testing tools that run after discovery.
+    discovered_params: dict[str, set] = field(default_factory=dict)
     # tool name -> raw stdout, reproduced verbatim in the report appendix
     raw_outputs: dict[str, str] = field(default_factory=dict)
     scores: dict = field(default_factory=dict)
 
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _cleanups: list = field(default_factory=list, repr=False)
     _form_sigs: set = field(default_factory=set, repr=False)
     # Script sources and inline script bodies collected while crawling, mined
     # afterwards for endpoints the HTML never links to.
@@ -421,6 +428,34 @@ class ScanContext:
                         and existing.proto == service.proto):
                     return
             self.services.append(service)
+
+    def add_params(self, url: str, params) -> None:
+        """Record hidden parameters discovered for a URL (Arjun)."""
+        names = {str(p).strip() for p in params if str(p).strip()}
+        if not url or not names:
+            return
+        with self._lock:
+            self.discovered_params.setdefault(url, set()).update(names)
+
+    def add_cleanup(self, fn) -> None:
+        """Register a teardown callback (e.g. stopping a spawned daemon).
+
+        Run once, at the end of the scan, by :meth:`run_cleanups`. Kept generic
+        so an integration can spawn a resource without the runner knowing about
+        it. An ``atexit`` safety net should back critical teardowns for the
+        interrupt/crash path, since a hard exit skips this.
+        """
+        with self._lock:
+            self._cleanups.append(fn)
+
+    def run_cleanups(self) -> None:
+        with self._lock:
+            pending, self._cleanups = self._cleanups, []
+        for fn in pending:
+            try:
+                fn()
+            except Exception as exc:
+                self.logger and self.logger.warning("cleanup failed: %s", exc)
 
     def add_raw_output(self, tool: str, text: str, limit: int = 40000) -> None:
         if not text or not text.strip():

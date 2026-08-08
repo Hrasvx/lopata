@@ -125,3 +125,8 @@ def _resolve(names: set[str], threads: int, phase) -> set[str]:
                 resolved.add(name)
             phase and phase.step()
     return resolved
+
+
+def register():
+    from ..core.plugins import integration
+    return integration('subfinder', run, available, phase='recon', order=10)

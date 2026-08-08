@@ -10,11 +10,9 @@ caps them accordingly.
 from __future__ import annotations
 
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin, urlparse
 
-import requests
-
+from ..core import async_http
 from ..core.baseline import ResponseSnapshot, similarity
 from ..core.models import (AREA_CONFIG, Confidence, Effort, Finding,
                            FindingType, PassedCheck, Severity)
@@ -165,14 +163,14 @@ def run(ctx, phase=None) -> None:
         phase.set_total(len(probes))
 
     found = 0
-    with ThreadPoolExecutor(max_workers=ctx.threads) as pool:
-        futures = {pool.submit(_probe, ctx, baseline, p): p for p in probes}
-        for fut in as_completed(futures):
-            finding = fut.result()
-            if finding:
-                ctx.add_finding(finding)
-                found += 1
-            phase and phase.step()
+    urls = [urljoin(ctx.target + "/", p.path) for p in probes]
+    responses = dict(async_http.fetch_all(ctx, urls, allow_redirects=False))
+    for probe, url in zip(probes, urls):
+        finding = _probe(ctx, baseline, probe, responses.get(url))
+        if finding:
+            ctx.add_finding(finding)
+            found += 1
+        phase and phase.step()
     phase and phase.done()
 
     if not found:
@@ -184,14 +182,9 @@ def run(ctx, phase=None) -> None:
             source=MODULE_NAME, location=ctx.target, score_area=AREA_CONFIG))
 
 
-def _probe(ctx, baseline, probe: _Probe) -> Finding | None:
+def _probe(ctx, baseline, probe: _Probe, resp) -> Finding | None:
     url = urljoin(ctx.target + "/", probe.path)
-    try:
-        resp = ctx.session.get(url, timeout=ctx.timeout, allow_redirects=False)
-    except requests.RequestException:
-        return None
-
-    if resp.status_code >= 400 or resp.is_redirect:
+    if resp is None or resp.status_code >= 400 or resp.is_redirect:
         return None
 
     snap = ResponseSnapshot.capture(resp)
@@ -294,3 +287,8 @@ def _impact_text(impact: Impact) -> str:
                             "reliable.",
         Impact.NEGLIGIBLE: "Minimal direct impact.",
     }[impact]
+
+
+def register():
+    from ..core.plugins import web_module
+    return web_module('exposure', run, requires_crawl=False, order=70)

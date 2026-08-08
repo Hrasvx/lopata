@@ -1,95 +1,41 @@
-
 <p align="center"><img width="700" src="lopata.png" alt="description" /></p>
-A CLI defensive web-application security assessment tool, written in Python and
-built for **Alpine Linux**. lopata does its own web-layer testing (XSS, SQLi,
-CSRF, headers, CORS, open redirect, exposed files, cookies, clickjacking,
-server misconfig) and orchestrates established external tools for the parts they
-already solve well (nmap, nikto, sslyze/testssl.sh, whatweb, subfinder). Every
-finding is exported into a PDF report.
 
-What separates it from a scanner wrapper is what happens *after* the tools run:
-every observation is re-checked, classified, correlated across sources, and
-scored, so the report reads like an assessment rather than concatenated tool
-output. lopata prefers a handful of accurate findings over a long list of
-uncertain ones, and it says plainly how sure it is about each.
+Lopata is a command-line tool that checks websites for security problems. It runs on Alpine Linux and is written in Python.
 
-> ⚠️ **Authorized testing only.** lopata is for security testing of systems you
-> **own** or have **explicit written permission** to test. Unauthorized
-> scanning may be illegal and unethical. lopata identifies itself honestly in
-> the target's logs (`User-Agent: lopata/1.0`). You are responsible for how you
-> use it.
+It does checks for XSS, SQL injection, CSRF, bad headers, CORS issues, open redirects, exposed files, cookie problems, and clickjacking. For everything else, it calls well-known tools like nmap, nikto, sslyze/testssl.sh, whatweb, subfinder, httpx, ffuf, nuclei, dalfox, sqlmap, arjun, gitleaks, and OWASP ZAP.
 
----
+Every result gets turned into a PDF or a single self-contained HTML report.
 
-## Highlights
+⚠️ **Only test sites you own or have written permission to test.** You are responsible for how you use this tool.
 
-- **Recon → crawl → test → correlate → report** pipeline in a single command.
-- **Interprets tool output rather than forwarding it.** An NSE script that says
-  `NOT VULNERABLE` becomes a *passed check*, not a finding; a CVE matched
-  against a version banner is a Low-confidence patch-review lead, never a High.
-- **Findings are typed**, not all called vulnerabilities: Confirmed
-  Vulnerability, Potential Vulnerability, Misconfiguration, Security Exposure,
-  Service Inventory, Informational. An open SSH port is an exposure; a
-  reproduced SQL injection is a vulnerability.
-- **Severity is calculated, not inherited** — from impact, exploitability,
-  authentication requirement, network exposure and confirmation level — and the
-  report shows the reasoning for every rating.
-- **Correlation pass** merges duplicate observations, raises confidence when
-  independent sources agree, lowers it when a single tool is the only voice,
-  and groups one issue across many URLs into one finding.
-- **Category security scores** (TLS, HTTP Security, Attack Surface, Patch
-  Management, Web Application Security, Configuration) with a weighted overall.
-- **Authenticated scans**, **checkpoint/resume**, **report filtering**, and
-  **file logging**.
+
+
+## How findings are scored
+
+Every finding has a **confidence** level, and that confidence limits how high its severity can go.
+
+| Confidence | What it means | 
+|---|---|
+| **Confirmed** | Lopata safely reproduced the issue itself |
+| **High** | Two+ tools agree, or a retest confirmed it |
+| **Medium** | Strong evidence, but from one source only |
+| **Low** | Based only on a version number or banner |
+| **Informational** | Just discovery data, no claim being made |
+
+Passed checks are kept in their own section "not vulnerable".
+
+Severity is worked out from five things: impact, how exploitable it is, whether authentication is needed, whether it's reachable from the internet, and confidence + a public CVSS score if one exists.
 
 ---
 
-## How findings are graded
-
-Every finding carries a **confidence** level that reflects the evidence behind
-it, and confidence caps severity — so an unverified claim can never present
-itself as a Critical.
-
-| Confidence | Evidence | Max severity |
-|---|---|---|
-| **Confirmed** | lopata reproduced the behaviour itself (safe verification) | Critical |
-| **High** | Multiple independent sources agree, or a targeted re-test passed | High |
-| **Medium** | Strong single-source evidence, not independently verified | Medium |
-| **Low** | Banner or version matching only | Low |
-| **Informational** | Discovery and inventory data; nothing is being asserted | Info |
-
-Negative results are kept too: the report has a **Checks Passed** section, which
-is where "NOT VULNERABLE", "not affected" and "no vulnerabilities found" tool
-output ends up instead of being inverted into a finding.
-
-Severity comes from five factors — impact, exploitability, authentication
-requirement, network exposure and confidence — plus a published CVSS score when
-one applies. A worked example, from the report itself:
-
-```
-SQL injection (error-based)                       Critical · Confirmed
-Severity rationale
-  – Can lead to full compromise of the host or application
-  – Publicly accessible from the internet
-  – No authentication required
-  – Exploitable with a single crafted request
-  – Reproduced by lopata during the scan
-```
-
-The same engine keeps ratings honest in the other direction: a public MySQL
-port is a **Medium** Security Exposure ("reachability, not access"), not a High,
-because the engine still requires credentials — while Redis, which has no
-authentication by default, is a High.
-
----
-
-## Installation (Alpine Linux)
-
+## Installing on Alpine Linux
+just the best distro btw
 ```sh
 git clone https://github.com/Hrasvx/lopata lopata && cd lopata
-./install.sh                # --no-tools to skip the external scanners
+./install.sh                # add --no-tools to skip external scanners
 lopata --help
 ```
+
 ### Manual install
 
 ```sh
@@ -100,46 +46,42 @@ python3 -m venv .venv
 
 ---
 
-## External tools
+## External tools it uses
 
-lopata detects each with `shutil.which` at runtime; if a tool is absent the
-corresponding phase is skipped and noted in the report. **`./install.sh`
-installs all of these for you** — the table below documents what it does under
-the hood, since only some are packaged in the Alpine repos.
+ `./install.sh` installs everything below.
 
-| Tool | Purpose in lopata | How install.sh gets it on Alpine 3.24 |
-|------|-------------------|----------------------------------------|
-| **nmap** | port/service discovery, `-sV`, `--script vuln` recon (bounded by `--host-timeout`/`--script-timeout` so a slow NSE script cannot consume the whole budget) | `apk add nmap nmap-scripts` |
-| **nikto** | server misconfig / known-vulnerable files | `apk add nikto` (as `nikto.pl`) **plus its perl deps** `perl-xml-writer perl-json perl-net-ssleay perl-crypt-ssleay perl-io-socket-ssl`, or it errors at runtime |
-| **sslyze** *or* **testssl.sh** | TLS protocol/cipher/cert checks | sslyze is `pip install`ed into the venv (primary); testssl.sh is `git clone`d as a fallback — neither is in apk |
-| **whatweb** | tech-stack fingerprint (informs which checks run) | **not a RubyGem / not in apk** — `git clone` from GitHub + the Ruby ≥3.4 runtime gems it needs (`getoptlong resolv resolv-replace ipaddr addressable json`) |
-| **subfinder** *or* amass | passive subdomain enumeration | **not in apk** — built with `go install` (install.sh adds `go` if missing) |
+| Tool | What it's used for |
+|------|--------------------|
+| **nmap** | Finds open ports and running services |
+| **nikto** | Checks for server misconfigurations and known bad files |
+| **sslyze** / **testssl.sh** | Checks TLS versions, ciphers, and certificates |
+| **whatweb** | Detects what tech stack the site uses |
+| **subfinder** | Finds subdomains |
+| **httpx** | Quickly checks which found URLs are actually live |
+| **ffuf** | Discovers hidden pages and files |
+| **nuclei** | Matches the site against known CVE templates |
+| **dalfox** | A second, independent XSS scanner |
+| **sqlmap** | Confirms SQL injection leads found by lopata |
+| **arjun** | Finds hidden URL parameters |
+| **gitleaks** | Scans site files for leaked secrets |
+| **OWASP ZAP** | A second, independent web app scanner |
 
-Tools not in the Alpine repos are symlinked into `/usr/local/bin` after install
-so lopata's runtime detection finds them. Custom Python logic is reserved for
-what these tools don't cover well: XSS/SQLi payload injection with response
-diffing, CSRF token checks, cookie flags, CORS misconfig, and open-redirect
-detection.
+Tools not available through Alpine's package manager get built or downloaded by `install.sh` and linked so lopata can find them.
 
-**What lopata does with their output.** No tool's verdict is copied into the
-report as-is:
+**Order of operations:** nmap, nikto, sslyze/testssl, whatweb, subfinder, httpx, and ffuf run first, since they only need the target host. Arjun, nuclei, dalfox, sqlmap, ZAP, and gitleaks run after the crawler, since they need the URLs, forms, and pages it finds. Everything then goes through the same merging step, so results across tools get cross-checked against each other.
 
-- **nmap** — open ports become a *service inventory*, never findings. NSE output
-  is classified before use: `NOT VULNERABLE` / `not affected` / `patched`
-  becomes a passed check; `State: VULNERABLE (Exploitable)` becomes a
-  vulnerability; a `vulners` CVE list becomes **one** Low-confidence patch-review
-  finding for the service, not one finding per CVE.
-- **nikto** — each item is re-requested by lopata and compared against the
-  learned soft-404 baseline and the site homepage; anything indistinguishable
-  from "not there" is dropped. Surviving items are classified so a missing
-  header is a Misconfiguration and an outdated-banner notice is a Low-confidence
-  patch lead.
-- **sslyze / testssl.sh** — these negotiate real handshakes, so their positive
-  results are Confirmed. Their *negative* results become passed checks, so the
-  report can show that TLS 1.0 was tested for and rejected.
-- **whatweb / wappalyzer** — feeds the technology registry rather than emitting
-  a finding. A component seen by both whatweb and lopata's own passive
-  fingerprinting is promoted to High confidence.
+---
+
+## XSS checker
+
+Instead of blasting every page with generic payloads, lopata figures out **which characters get through** unescaped, **where** the input lands (HTML, an attribute, JavaScript, a URL, etc.), and builds the **smallest payload that works** for that spot.
+
+It checks for:
+
+- **Reflected XSS** — in URL parameters, form fields, headers, and JSON API bodies, including hidden parameters found by Arjun.
+- **Stored XSS** — submits a unique marker through a form, then checks if it shows up unescaped elsewhere.
+- **DOM-based XSS** — confirmed using a real (headless) browser, including while logged in, if Playwright is installed.
+- **Blind XSS** — plants a unique tracking payload per input and waits for a callback, either from lopata's own built-in listener or an external service you set up.
 
 ---
 
@@ -148,9 +90,12 @@ report as-is:
 ```sh
 lopata example.com                                  # full scan, all modules + tools
 lopata https://example.com --json -o report.pdf     # PDF + JSON to a chosen path
+lopata example.com --export html                     # self-contained HTML report
+lopata example.com -o report.html                    # format inferred from extension
+lopata example.com --export html --json              # HTML + JSON together
 lopata example.com --modules headers,cookies,xss    # only these web modules
 lopata example.com --no-tools                        # skip external scanners
-lopata example.com --tools nmap,sslscan              # only these integrations
+lopata example.com --tools nmap,dalfox,nuclei        # only these integrations
 lopata example.com --config profile.yaml             # repeatable scan profile
 lopata example.com --auth-cookie "session=abc123" \
                    --auth-header "Authorization: Bearer TOKEN"   # authenticated
@@ -158,7 +103,7 @@ lopata example.com --resume                          # continue an interrupted s
 lopata example.com --logfile scan.log -v             # verbose logging to a file
 ```
 
-Run `lopata --help` for the full flag list.
+`--export {pdf,html}` picks the report format (default is `pdf`). Using `-o` with a `.html` file name also switches the format, unless `--export` is set explicitly. `--json` works independently of both.
 
 ### Filtering the report
 
@@ -170,46 +115,15 @@ lopata example.com --category "TLS,Cookies"     # by category
 lopata example.com --no-correlate               # keep every raw observation
 ```
 
-Filters apply to the report only. Scoring runs first, so hiding findings never
-flatters the score.
-
-> Screenshots are not produced: lopata is a pure-HTTP scanner with no browser
-> engine, so evidence is captured as request/response pairs, banners and
-> verbatim tool output instead.
-
-## Output
-
-- **PDF report** (`reportlab`), in reading order:
-  1. Cover — overall score, grade, severity distribution, surface size
-  2. Executive summary — narrative verdict, finding types, principal risks
-  3. Security score by category, with weights and the largest contributor to each
-  4. Technology summary — CMS, framework, server, language, CDN, WAF, JS libs
-  5. Attack surface summary — services grouped by function, external vs internal
-  6. Recommended remediation order — priority, effort, business impact, quick wins
-  7. Findings by severity, and by type/category
-  8. Detailed findings — summary, technical detail, why it matters, potential
-     impact, **severity rationale**, evidence (request/response), what lopata
-     verified, step-by-step remediation, how to verify the fix, references
-  9. Checks passed
-  10. Appendices — tooling, discovered URLs, client-side routes, and **raw
-      scanner output** verbatim
-- **JSON** (`--json`): every finding with its type, confidence rank, score area,
-  priority, effort and remediation steps, plus category scores, technology and
-  service inventories, passed checks, discovered URLs and raw tool output.
-
----
+Filters only affect the report — scoring is done before filtering, so hiding findings never improves the score.
 
 ## Configuration profiles
 
-Copy `lopata.example.yaml`, edit, and pass with `--config`. A profile pins
-threads/timeouts, which modules and external tools to run, baseline tuning, and
-(optionally) auth. **CLI flags always override the file.** Prefer passing
-secrets via `--auth-cookie`/`--auth-header` rather than committing them to a
-profile.
+Copy `lopata.example.yaml`, edit it, and run with `--config`. It can set thread/timeout defaults, which modules and tools to run, and (optionally) auth details. **Command-line flags always override the config file.** Prefer `--auth-cookie`/`--auth-header` over putting secrets in the file.
 
 ---
 
-## Repository layout
+## Project layout
 
 ```
 lopata/
@@ -219,22 +133,26 @@ lopata/
 ├── lopata.example.yaml
 └── lopata/
     ├── cli.py
-    ├── core/
-    │   ├── models.py       # Finding/Technology/Service, severity + confidence enums
-    │   ├── severity.py     # severity calculation and its human-readable reasons
-    │   ├── knowledge.py    # per-service risk/impact/remediation knowledge base
-    │   ├── correlate.py    # dedup, cross-tool corroboration, grouping
-    │   ├── scoring.py      # category scores and weighted overall
-    │   ├── baseline.py     # soft-404 learning, used to kill false positives
-    │   ├── http.py  config.py  checkpoint.py  logging_setup.py  ui.py
-    ├── integrations/
-    │   ├── nmap.py  nikto.py  sslscan.py  whatweb.py  subfinder.py
-    ├── modules/
-    │   ├── crawler.py       # robots, sitemaps, JS endpoints, SPA routes, wordlist
-    │   ├── fingerprint.py   # passive tech detection (works without whatweb)
-    │   ├── attack_surface.py# groups services by function, external vs internal
-    │   ├── headers.py  cookies.py  clickjacking.py  cors.py
-    │   ├── exposure.py  misconfig.py  open_redirect.py  csrf.py  xss.py  sqli.py
-    └── report/
+    ├── core/           # data models, severity logic, correlation, scoring, config
+    ├── integrations/   # nmap, nikto, whatweb, nuclei, dalfox, sqlmap, zap, etc.
+    ├── modules/         # crawler, fingerprinting, headers, cookies, xss, sqli, etc.
+    └── report/          # pdf.py  html.py  json_out.py  sarif_out.py
 ```
 
+## Writing a plugin
+
+Checks and integrations are auto-discovered — just drop a new file into `lopata/modules/` or `lopata/integrations/` with a `register()` function, and lopata finds it.
+
+```python
+# lopata/modules/customplugin.py
+from ..core.plugins import web_module
+
+MODULE_NAME = "customplugin"
+
+def run(ctx, phase=None):
+    ctx.modules_run.append(MODULE_NAME)
+    # ... ctx.add_finding(Finding(...)) ...
+
+def register():
+    return web_module(MODULE_NAME, run, requires_crawl=True, order=115)
+```

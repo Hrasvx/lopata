@@ -37,6 +37,24 @@ symlink() {
     $SUDO ln -sf "$1" "/usr/local/bin/$2"
 }
 
+# go_install <module@version> <binname>: build a Go tool and symlink it into
+# /usr/local/bin so lopata's runtime detection finds it.
+go_install() {
+    command -v "$2" >/dev/null 2>&1 && { ok "$2 already present"; return 0; }
+    command -v go >/dev/null 2>&1 || $SUDO apk add --no-cache go
+    if ! command -v go >/dev/null 2>&1; then
+        warn "Go unavailable; skipping $2."; return 1
+    fi
+    say "Installing $2 (via Go; first build can take a minute)..."
+    if GO111MODULE=on go install "$1"; then
+        gobin="$(go env GOBIN)"; [ -n "$gobin" ] || gobin="$(go env GOPATH)/bin"
+        symlink "$gobin/$2" "$2" && ok "$2 -> /usr/local/bin/$2" \
+            || warn "$2 built but symlink failed."
+    else
+        warn "$2 build failed; that tool will skip at runtime."
+    fi
+}
+
 say "Installing base packages via apk..."
 $SUDO apk add --no-cache \
     python3 py3-pip python3-dev \
@@ -55,6 +73,12 @@ if [ "$INSTALL_TOOLS" -eq 1 ]; then
         && ok "nmap + nikto installed" \
         || warn "nmap/nikto install had errors; those modules will skip."
     [ -x /usr/bin/nikto.pl ] && symlink /usr/bin/nikto.pl nikto
+
+    say "Installing apk-packaged tools (sqlmap, gitleaks — community repo)..."
+    $SUDO apk add --no-cache sqlmap gitleaks \
+        && ok "sqlmap + gitleaks installed" \
+        || warn "sqlmap/gitleaks not found in apk; enable the community repo or "
+    warn "install them manually (pip install sqlmap / go install gitleaks)."
 
     if [ "$APK_ONLY" -eq 0 ]; then
         mkdir -p "$THIRD_PARTY"
@@ -77,6 +101,18 @@ if [ "$INSTALL_TOOLS" -eq 1 ]; then
             else
                 warn "Go unavailable; skipping subfinder."
             fi
+        fi
+
+        # ProjectDiscovery + Dalfox + ffuf: all Go, all not in apk.
+        go_install github.com/projectdiscovery/httpx/cmd/httpx@latest httpx
+        go_install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest nuclei
+        go_install github.com/hahwul/dalfox/v2@latest dalfox
+        go_install github.com/ffuf/ffuf/v2@latest ffuf
+        if command -v nuclei >/dev/null 2>&1; then
+            say "Fetching nuclei templates (one-off; scans run with -duc after)..."
+            nuclei -update-templates >/dev/null 2>&1 \
+                && ok "nuclei templates installed" \
+                || warn "nuclei template fetch failed; run 'nuclei -update-templates'."
         fi
 
         if command -v whatweb >/dev/null 2>&1; then
@@ -141,6 +177,14 @@ if [ "$INSTALL_TOOLS" -eq 1 ]; then
     "$VENV_DIR/bin/pip" install sslyze \
         && ok "sslyze installed" \
         || warn "sslyze install failed; install testssl.sh (done above) for TLS."
+
+    say "Installing arjun (hidden-parameter discovery) into the venv..."
+    if "$VENV_DIR/bin/pip" install arjun; then
+        symlink "$VENV_DIR/bin/arjun" arjun
+        ok "arjun installed"
+    else
+        warn "arjun install failed; hidden-parameter discovery will skip."
+    fi
 fi
 
 say "Linking launcher -> $BIN_TARGET"
@@ -153,11 +197,12 @@ $SUDO chmod +x "$BIN_TARGET"
 
 echo
 ok "Install complete. Detected external tools:"
-for t in nmap nikto subfinder whatweb testssl.sh; do
+for t in nmap nikto subfinder whatweb testssl.sh httpx ffuf nuclei dalfox \
+         sqlmap gitleaks; do
     if command -v "$t" >/dev/null 2>&1; then
         printf '  \033[32m OK\033[0m %s\n' "$t"
     else
-        printf '  \033[33m --\033[0m %s (absent; module will skip)\n' "$t"
+        printf '  \033[33m --\033[0m %s (absent; tool will skip)\n' "$t"
     fi
 done
 if [ -x "$VENV_DIR/bin/sslyze" ] || command -v sslyze >/dev/null 2>&1; then
@@ -165,6 +210,13 @@ if [ -x "$VENV_DIR/bin/sslyze" ] || command -v sslyze >/dev/null 2>&1; then
 else
     printf '  \033[33m --\033[0m sslyze\n'
 fi
+if [ -x "$VENV_DIR/bin/arjun" ] || command -v arjun >/dev/null 2>&1; then
+    printf '  \033[32m OK\033[0m arjun (hidden-parameter discovery)\n'
+else
+    printf '  \033[33m --\033[0m arjun\n'
+fi
+printf '  \033[33m ~~\033[0m zap (optional DAST — not auto-installed; start ZAP as a\n'
+printf '        daemon and set zap_api/zap_api_key in your profile to enable)\n'
 echo
 say "Try:  lopata --help"
 say "Reminder: only scan systems you are authorized to test."

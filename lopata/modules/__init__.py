@@ -1,23 +1,13 @@
-from . import (attack_surface, clickjacking, cookies, cors, crawler, csrf,
-               exposure, fingerprint, headers, misconfig, open_redirect, sqli,
-               xss)
+"""Web-layer check modules.
 
+The old hand-maintained ``MODULES`` dict is gone: modules are now discovered by
+walking this package and calling each submodule's ``register()`` (see
+``lopata.core.plugins``). ``MODULES`` is kept as a backward-compatible view —
+``name -> (plugin, requires_crawl)`` — because the plugin object exposes
+``run(ctx, phase)`` and so is a drop-in for the module object the runner
+expected. Execution order is the plugins' ``order`` field.
+"""
 
-# name -> (module, requires the crawler to have run first)
-# Order is execution order: discovery and fingerprinting first, so the checks
-# that depend on knowing the stack and the URL inventory can use them.
-MODULES = {
-    "crawler": (crawler, False),
-    "fingerprint": (fingerprint, False),
-    "attack_surface": (attack_surface, False),
-    "headers": (headers, False),
-    "cookies": (cookies, False),
-    "clickjacking": (clickjacking, False),
-    "cors": (cors, True),
-    "exposure": (exposure, False),
-    "misconfig": (misconfig, True),
-    "redirect": (open_redirect, True),
-    "csrf": (csrf, True),
-    "xss": (xss, True),
-    "sqli": (sqli, True),
-}
+from ..core.plugins import discover
+
+MODULES = {p.name: (p, p.requires_crawl) for p in discover()["modules"]}

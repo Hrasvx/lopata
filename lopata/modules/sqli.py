@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from collections import namedtuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
-import requests
-
+from ..core import async_http
+from ..core.async_http import AsyncFetcher
 from ..core.baseline import similarity
 from ..core.models import (AREA_WEBAPP, Confidence, Effort, Finding,
                            FindingType, Severity)
@@ -105,12 +105,21 @@ def run(ctx, phase=None) -> None:
     targets = _targets(ctx)
     if phase:
         phase.set_total(max(len(targets), 1))
-    with ThreadPoolExecutor(max_workers=max(ctx.threads // 2, 1)) as pool:
-        futures = [pool.submit(_test_param, ctx, t) for t in targets]
-        for fut in as_completed(futures):
-            for f in fut.result():
-                ctx.add_finding(f)
-            phase and phase.step()
+
+    async def _driver():
+        # Half the crawl concurrency, as the thread pool used, and a timeout wide
+        # enough to let the time-based sleep payloads return without tripping it.
+        conc = max(ctx.threads // 2, 1)
+        async with AsyncFetcher.from_ctx(
+                ctx, concurrency=conc,
+                timeout=ctx.timeout + SLEEP_SECONDS + 2) as fetcher:
+            async def one(target):
+                for finding in await _test_param(ctx, fetcher, target):
+                    ctx.add_finding(finding)
+                phase and phase.step()
+            await asyncio.gather(*(one(t) for t in targets))
+
+    async_http.run(_driver())
     phase and phase.done()
 
 
@@ -132,43 +141,41 @@ def _targets(ctx) -> list[Target]:
     return out
 
 
-def _send(ctx, target: Target, value: str):
-    timeout = ctx.timeout + SLEEP_SECONDS + 2
-    try:
-        if target.method == "post":
-            payload = dict(target.data)
-            payload[target.param] = value
-            r = ctx.session.post(target.url, data=payload, timeout=timeout)
-        else:
-            parsed = urlparse(target.url)
-            q = parse_qs(parsed.query, keep_blank_values=True)
-            for k, v in target.data.items():
-                q[k] = [v]
-            q[target.param] = [value]
-            url = urlunparse(parsed._replace(query=urlencode(q, doseq=True)))
-            r = ctx.session.get(url, timeout=timeout)
-        return r.text, r.elapsed.total_seconds()
-    except requests.RequestException:
+async def _send(ctx, fetcher, target: Target, value: str):
+    if target.method == "post":
+        payload = dict(target.data)
+        payload[target.param] = value
+        r = await fetcher.post(target.url, data=payload, allow_redirects=True)
+    else:
+        parsed = urlparse(target.url)
+        q = parse_qs(parsed.query, keep_blank_values=True)
+        for k, v in target.data.items():
+            q[k] = [v]
+        q[target.param] = [value]
+        url = urlunparse(parsed._replace(query=urlencode(q, doseq=True)))
+        r = await fetcher.get(url, allow_redirects=True)
+    if r is None:
         return None, None
+    return r.text, r.elapsed.total_seconds()
 
 
 def _reqline(target: Target, value: str) -> str:
     return f"{target.method.upper()} {target.url}  {target.param}={value}"
 
 
-def _test_param(ctx, target: Target) -> list[Finding]:
+async def _test_param(ctx, fetcher, target: Target) -> list[Finding]:
     findings: list[Finding] = []
-    clean_body, _ = _send(ctx, target, "lopata1")
+    clean_body, _ = await _send(ctx, fetcher, target, "lopata1")
     if clean_body is None:
         return findings
 
-    badinput_body, _ = _send(ctx, target, "lopata_$$$_%%%")
+    badinput_body, _ = await _send(ctx, fetcher, target, "lopata_$$$_%%%")
     refs = [b for b in (clean_body, badinput_body) if b]
 
     loc = f"{target.url} [{target.method.upper()} param: {target.param}]"
 
     for payload in ERROR_PAYLOADS:
-        body, _ = _send(ctx, target, "lopata" + payload)
+        body, _ = await _send(ctx, fetcher, target, "lopata" + payload)
         if body is None:
             continue
         m = _ERROR_SIGNS.search(body)
@@ -198,7 +205,7 @@ def _test_param(ctx, target: Target) -> list[Finding]:
             ))
             return findings
 
-    if _boolean_blind(ctx, target, clean_body):
+    if await _boolean_blind(ctx, fetcher, target, clean_body):
         findings.append(_sqli_finding(
             name="SQL injection (boolean-based blind)",
             loc=loc, target=target,
@@ -225,19 +232,19 @@ def _test_param(ctx, target: Target) -> list[Finding]:
         ))
         return findings
 
-    tf = _time_blind(ctx, target)
+    tf = await _time_blind(ctx, fetcher, target)
     if tf:
         findings.append(tf.finding(loc, target))
     return findings
 
 
-def _boolean_blind(ctx, target: Target, clean_body: str) -> bool:
-    def pair():
-        t, _ = _send(ctx, target, BOOL_TRUE)
-        f, _ = _send(ctx, target, BOOL_FALSE)
+async def _boolean_blind(ctx, fetcher, target: Target, clean_body: str) -> bool:
+    async def pair():
+        t, _ = await _send(ctx, fetcher, target, BOOL_TRUE)
+        f, _ = await _send(ctx, fetcher, target, BOOL_FALSE)
         return t, f
 
-    t1, f1 = pair()
+    t1, f1 = await pair()
     if t1 is None or f1 is None:
         return False
     if not (similarity(clean_body, t1) >= 0.95
@@ -245,7 +252,7 @@ def _boolean_blind(ctx, target: Target, clean_body: str) -> bool:
             and similarity(t1, f1) <= 0.90):
         return False
 
-    t2, f2 = pair()
+    t2, f2 = await pair()
     if t2 is None or f2 is None:
         return False
     return (similarity(clean_body, t2) >= 0.95
@@ -283,17 +290,22 @@ class _TimeHit:
         )
 
 
-def _time_blind(ctx, target: Target) -> "_TimeHit | None":
-    _, control_t = _send(ctx, target, TIME_CONTROL)
+async def _time_blind(ctx, fetcher, target: Target) -> "_TimeHit | None":
+    _, control_t = await _send(ctx, fetcher, target, TIME_CONTROL)
     if control_t is None:
         return None
     for payload in TIME_PAYLOADS:
-        _, t1 = _send(ctx, target, payload)
+        _, t1 = await _send(ctx, fetcher, target, payload)
         if t1 is None or t1 < SLEEP_SECONDS * 0.8:
             continue
-        _, t2 = _send(ctx, target, payload)
-        _, c2 = _send(ctx, target, TIME_CONTROL)
+        _, t2 = await _send(ctx, fetcher, target, payload)
+        _, c2 = await _send(ctx, fetcher, target, TIME_CONTROL)
         if (t2 is not None and t2 >= SLEEP_SECONDS * 0.8
                 and c2 is not None and c2 < SLEEP_SECONDS * 0.5):
             return _TimeHit(payload, (t1 + t2) / 2, (control_t + c2) / 2)
     return None
+
+
+def register():
+    from ..core.plugins import web_module
+    return web_module('sqli', run, requires_crawl=True, order=120)

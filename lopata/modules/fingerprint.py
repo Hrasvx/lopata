@@ -299,3 +299,8 @@ def _report(ctx) -> None:
         evidence="\n".join(lines)[:1200],
         sources=[MODULE_NAME],
     ))
+
+
+def register():
+    from ..core.plugins import web_module
+    return web_module('fingerprint', run, requires_crawl=False, order=10)

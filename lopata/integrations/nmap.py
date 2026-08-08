@@ -417,3 +417,8 @@ def _script_title(output: str) -> str:
 def _squash(text: str, limit: int) -> str:
     text = "\n".join(ln.rstrip() for ln in (text or "").splitlines() if ln.strip())
     return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def register():
+    from ..core.plugins import integration
+    return integration('nmap', run, available, phase='recon', order=30)

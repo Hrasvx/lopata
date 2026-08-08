@@ -402,3 +402,8 @@ def _references(item: dict) -> list[str]:
 def _short(msg: str, limit: int = 90) -> str:
     msg = " ".join(str(msg).split())
     return msg if len(msg) <= limit else msg[:limit - 1] + "…"
+
+
+def register():
+    from ..core.plugins import integration
+    return integration('nikto', run, available, phase='recon', order=50)

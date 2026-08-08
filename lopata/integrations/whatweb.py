@@ -144,3 +144,8 @@ def _run_wappalyzer(ctx, info) -> list[tuple[str, str, str]]:
         out.append((name, str(tech.get("version") or ""),
                     f"wappalyzer: {label}".strip(": ")))
     return out
+
+
+def register():
+    from ..core.plugins import integration
+    return integration('whatweb', run, available, phase='recon', order=40)

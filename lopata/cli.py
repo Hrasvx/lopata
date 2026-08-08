@@ -18,9 +18,10 @@ from .core.http import build_session, normalize_target, parse_auth_args
 from .core.logging_setup import get_logger
 from .core.models import Confidence, ScanContext, Severity
 from .core.ui import LopataUI
-from .integrations import INTEGRATIONS
+from .integrations import INTEGRATIONS, phase_of
 from .modules import MODULES
-from .report import default_report_name, generate_report, write_json
+from .report import (default_report_name, generate_html_report,
+                     generate_report, write_json, write_sarif)
 
 DISCLAIMER = (
     "lopata is for AUTHORIZED testing ONLY. Use it exclusively against "
@@ -47,9 +48,31 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("target", help="Target URL or domain (e.g. example.com).")
     p.add_argument("-o", "--output", default=None,
-                   help="PDF report path (default: lopata_report_<target>_<ts>.pdf).")
+                   help="Report path (default: lopata_report_<target>_<ts>.<ext>). "
+                        "A .html/.htm extension selects the HTML format unless "
+                        "--export says otherwise.")
+    p.add_argument("--export", choices=["pdf", "html"], default=None,
+                   help="Report format (default: pdf). Inferred from the -o "
+                        "extension when -o is given without --export; an explicit "
+                        "--export always wins.")
     p.add_argument("--json", action="store_true",
-                   help="Also write machine-readable JSON next to the PDF.")
+                   help="Also write machine-readable JSON next to the report "
+                        "(independent of --export).")
+    p.add_argument("--sarif-out", default=None, metavar="PATH",
+                   help="Also write a SARIF 2.1.0 log to PATH for CI / GitHub "
+                        "code-scanning upload (independent of --export).")
+    p.add_argument("--blind-xss-listen", action="store_true",
+                   help="Start the built-in blind-XSS listener: plants unique "
+                        "per-injection tokens and confirms any out-of-band "
+                        "callback in the report.")
+    p.add_argument("--blind-xss-callback", default=None, metavar="URL",
+                   help="Advertise this callback base URL in blind-XSS payloads "
+                        "(e.g. a public tunnel in front of the listener, or an "
+                        "external service). Implies the listener unless the URL "
+                        "is fully external.")
+    p.add_argument("--blind-xss-wait", type=float, default=None, metavar="SECONDS",
+                   help="Hold the scan open this long after planting to catch "
+                        "late blind-XSS callbacks (default: 0).")
     p.add_argument("--modules", default=None,
                    help="Comma-separated web modules to run. "
                         f"Choices: {', '.join(MODULES)}. Default: all.")
@@ -131,6 +154,53 @@ def _select_tools(args, cfg) -> list[str]:
 
 
 
+def _run_tool_phase(ctx, ui, logger, names, completed, cp_path) -> None:
+    """Run a set of external-tool integrations, sharing the checkpoint and UI
+    bookkeeping. Used for both the recon phase (before the crawler) and the
+    post-discovery phase (after the web modules), which differ only in when
+    they run and what surface they consume."""
+    for name in names:
+        key = f"tool:{name}"
+        if key in completed:
+            ui.advance_overall()
+            continue
+        module = INTEGRATIONS[name]
+        info = module.available(ctx)
+        if not info.available:
+            ui.note(f"recon: {name} — skipped ({info.note or 'not available'})")
+            completed.append(key)
+            ckpt.save(ctx, cp_path, completed)
+            ui.advance_overall()
+            continue
+        ph = ui.phase(f"recon: {name}", total=1)
+        try:
+            module.run(ctx, ph)
+        except Exception as exc:
+            logger.warning("integration '%s' failed: %s", name, exc)
+        ph.done()
+        completed.append(key)
+        ckpt.save(ctx, cp_path, completed)
+        ui.advance_overall()
+
+
+def _resolve_export(args) -> str:
+    """Decide the report format: pdf (default) or html.
+
+    An explicit --export always wins. Otherwise, if -o carries a recognisable
+    extension we infer from it, so `-o report.html` produces HTML without a
+    second flag. Anything else falls back to pdf.
+    """
+    if args.export:
+        return args.export
+    if args.output:
+        ext = os.path.splitext(args.output)[1].lower()
+        if ext in (".html", ".htm"):
+            return "html"
+        if ext == ".pdf":
+            return "pdf"
+    return "pdf"
+
+
 def _apply_filters(ctx, args) -> int:
     """Drop findings the user asked not to see.
 
@@ -175,6 +245,12 @@ def run_scan(args) -> int:
         cfg["verify_tls"] = False
     if args.modules:
         cfg["modules"] = args.modules
+    if args.blind_xss_listen:
+        cfg["xss_blind_listener"] = True
+    if args.blind_xss_callback:
+        cfg["xss_blind_callback"] = args.blind_xss_callback
+    if args.blind_xss_wait is not None:
+        cfg["xss_blind_wait"] = args.blind_xss_wait
 
     try:
         target = normalize_target(args.target)
@@ -223,8 +299,25 @@ def run_scan(args) -> int:
         print(f"target appears unreachable: {exc}", file=sys.stderr)
         return 1
 
+    blind_listener = None
+    if cfg.get("xss_blind_listener"):
+        try:
+            from .core.blind_listener import BlindXSSListener
+            blind_listener = BlindXSSListener(
+                host=str(cfg.get("xss_blind_listen_host", "0.0.0.0")),
+                port=int(cfg.get("xss_blind_listen_port", 0) or 0),
+                callback_base=cfg.get("xss_blind_callback"),
+                logger=logger).start()
+            ctx.blind_listener = blind_listener
+            ui.note(f"blind-XSS listener active; callback {blind_listener.base_url}")
+        except Exception as exc:
+            logger.warning("could not start blind-XSS listener: %s", exc)
+            blind_listener = None
+
     web_modules = _select_web_modules(cfg.get("modules"))
     tools = _select_tools(args, cfg)
+    recon_tools = [t for t in tools if phase_of(t) == "recon"]
+    post_tools = [t for t in tools if phase_of(t) == "post"]
 
     cp_path = ckpt.checkpoint_path(target, args.checkpoint)
     completed: list[str] = []
@@ -240,30 +333,9 @@ def run_scan(args) -> int:
     t0 = time.perf_counter()
 
 
-    if tools:
+    if recon_tools:
         ui.section("recon — external tools")
-    for name in tools:
-        key = f"tool:{name}"
-        if key in completed:
-            ui.advance_overall()
-            continue
-        module = INTEGRATIONS[name]
-        info = module.available(ctx)
-        if not info.available:
-            ui.note(f"recon: {name} — skipped ({info.note or 'not available'})")
-            completed.append(key)
-            ckpt.save(ctx, cp_path, completed)
-            ui.advance_overall()
-            continue
-        ph = ui.phase(f"recon: {name}", total=1)
-        try:
-            module.run(ctx, ph)
-        except Exception as exc:
-            logger.warning("integration '%s' failed: %s", name, exc)
-        ph.done()
-        completed.append(key)
-        ckpt.save(ctx, cp_path, completed)
-        ui.advance_overall()
+    _run_tool_phase(ctx, ui, logger, recon_tools, completed, cp_path)
 
 
     ui.section("baseline & web-layer analysis")
@@ -290,6 +362,14 @@ def run_scan(args) -> int:
         ckpt.save(ctx, cp_path, completed)
         ui.advance_overall()
 
+    # Post-discovery tools consume the crawled surface (URLs, parameters, forms,
+    # fetched assets), so they run only now that the web modules are done — but
+    # still before correlation, so their output is merged and cross-corroborated
+    # with lopata's own findings like any other source.
+    if post_tools:
+        ui.section("verification — surface-aware tools")
+    _run_tool_phase(ctx, ui, logger, post_tools, completed, cp_path)
+
     # Correlation runs across every module's output at once: it merges
     # duplicate observations, raises confidence where independent sources
     # agree, lowers it where a lone tool is the only voice, and re-derives
@@ -307,6 +387,33 @@ def run_scan(args) -> int:
                     f"{len(ctx.findings)} finding(s)")
     ui.advance_overall()
 
+    # Fold any out-of-band blind-XSS callbacks into the report. This runs after
+    # correlation so a confirmed hit stands as its own CONFIRMED finding, and
+    # honours xss_blind_wait to give late callbacks a grace period first.
+    if blind_listener is not None:
+        try:
+            wait = float(cfg.get("xss_blind_wait", 0) or 0)
+            if wait > 0:
+                ui.note(f"holding {wait:.0f}s for blind-XSS callbacks…")
+                time.sleep(wait)
+            from .core.blind_listener import correlate_hits
+            confirmed = correlate_hits(ctx, blind_listener)
+            total_hits = len(blind_listener.hits())
+            if confirmed:
+                ui.note(f"blind-XSS: {confirmed} out-of-band callback(s) "
+                        "CONFIRMED and added to the report")
+            elif total_hits:
+                ui.note(f"blind-XSS: {total_hits} callback(s) received but none "
+                        "matched a planted token")
+        except Exception as exc:
+            logger.warning("blind-XSS correlation failed: %s", exc)
+        finally:
+            blind_listener.stop()
+
+    # Tear down anything a tool spawned for the scan (e.g. a ZAP daemon we
+    # started). Their results are already merged into ctx by this point.
+    ctx.run_cleanups()
+
     try:
         scoring.compute(ctx)
     except Exception as exc:
@@ -321,9 +428,10 @@ def run_scan(args) -> int:
     ui.stop()
 
 
-    out = args.output or default_report_name(target)
+    export_fmt = _resolve_export(args)
+    out = args.output or default_report_name(target, export_fmt)
     if os.path.isdir(out):
-        out = os.path.join(out, default_report_name(target))
+        out = os.path.join(out, default_report_name(target, export_fmt))
     parent = os.path.dirname(os.path.abspath(out))
     os.makedirs(parent, exist_ok=True)
 
@@ -333,11 +441,13 @@ def run_scan(args) -> int:
         "notes": notes.records if notes else [],
     }
     json_path = None
+    renderer = generate_html_report if export_fmt == "html" else generate_report
+    label = export_fmt.upper()
     try:
-        generate_report(ctx, out, meta)
+        renderer(ctx, out, meta)
     except Exception as exc:
-        logger.error("failed to write PDF: %s", exc)
-        print(f"failed to write PDF report: {exc}", file=sys.stderr)
+        logger.error("failed to write %s: %s", label, exc)
+        print(f"failed to write {label} report: {exc}", file=sys.stderr)
         return 1
 
     if args.json:
@@ -347,6 +457,16 @@ def run_scan(args) -> int:
         except Exception as exc:
             logger.error("failed to write JSON: %s", exc)
             json_path = None
+
+    if args.sarif_out:
+        sarif_path = args.sarif_out
+        parent = os.path.dirname(os.path.abspath(sarif_path))
+        os.makedirs(parent, exist_ok=True)
+        try:
+            write_sarif(ctx, sarif_path, meta, __version__)
+            ui.note(f"SARIF written to {os.path.abspath(sarif_path)}")
+        except Exception as exc:
+            logger.error("failed to write SARIF: %s", exc)
 
     ui.final_summary(ctx.findings, duration, os.path.abspath(out),
                      os.path.abspath(json_path) if json_path else None,

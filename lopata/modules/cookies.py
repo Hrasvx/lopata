@@ -183,3 +183,8 @@ def _redact(set_cookie: str) -> str:
     name, rest = set_cookie.split("=", 1)
     attrs = ";".join(rest.split(";")[1:])
     return f"{name}=<redacted>;{attrs}"[:200]
+
+
+def register():
+    from ..core.plugins import web_module
+    return web_module('cookies', run, requires_crawl=False, order=40)

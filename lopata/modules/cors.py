@@ -244,3 +244,8 @@ def _null_origin(ctx, url, evidence) -> None:
         confidence=Confidence.HIGH,
     ))
     ctx.add_finding(finding)
+
+
+def register():
+    from ..core.plugins import web_module
+    return web_module('cors', run, requires_crawl=True, order=60)

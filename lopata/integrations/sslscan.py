@@ -485,3 +485,8 @@ def _testssl_items(ctx, endpoint, items) -> None:
             confidence=Confidence.CONFIRMED,
         ))
         ctx.add_finding(finding)
+
+
+def register():
+    from ..core.plugins import integration
+    return integration('sslscan', run, available, phase='recon', order=60)

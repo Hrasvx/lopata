@@ -203,3 +203,8 @@ def _group_finding(ctx, group: str, services: list) -> None:
                       "should be a deliberate decision"] if reportable else [])),
     ))
     ctx.add_finding(finding)
+
+
+def register():
+    from ..core.plugins import web_module
+    return web_module('attack_surface', run, requires_crawl=False, order=20)

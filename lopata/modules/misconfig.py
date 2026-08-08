@@ -206,3 +206,8 @@ def _directory_listing(ctx, baseline) -> None:
             confidence=Confidence.CONFIRMED,
         ))
         ctx.add_finding(finding)
+
+
+def register():
+    from ..core.plugins import web_module
+    return web_module('misconfig', run, requires_crawl=True, order=80)

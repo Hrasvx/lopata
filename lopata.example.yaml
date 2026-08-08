@@ -24,12 +24,24 @@ extra_paths: []            # additional paths to probe, relative to the target
 modules: null
 
 # External tool integrations. Set false to skip a tool even if installed.
+# Recon-phase tools run before the crawler; post-phase tools run after it,
+# because they consume the discovered surface (URLs, parameters, forms, assets).
 tools:
+  # recon phase
   nmap: true
   nikto: true
   sslscan: true      # sslyze or testssl.sh, whichever is present
   whatweb: true
   subfinder: true
+  httpx: true        # confirm which subdomains are live; enrich tech inventory
+  ffuf: true         # content discovery (gobuster used if ffuf is absent)
+  # post-discovery phase
+  arjun: true        # hidden HTTP parameter discovery -> feeds dalfox/sqlmap
+  nuclei: true       # template-based known-CVE / exposure detection
+  dalfox: true       # second, independent XSS engine (corroborates xss.py)
+  sqlmap: true       # deeper confirmation of sqli.py's leads
+  zap: true          # OWASP ZAP DAST via API (needs a running ZAP daemon)
+  gitleaks: true     # secret scanning of JS/HTML/config (trufflehog fallback)
 
 # Per-tool tuning (optional).
 nmap_fast: true       # top-100 ports only
@@ -41,6 +53,54 @@ nikto_timeout: 240
 ssl_timeout: 180
 whatweb_timeout: 90
 subfinder_timeout: 120
+
+# Newer tools (all bounded).
+httpx_timeout: 120
+ffuf_timeout: 180
+ffuf_wordlist: null       # path to a wordlist; a small built-in list is used if null
+ffuf_max_hits: 60
+nuclei_timeout: 600
+nuclei_severity: "low,medium,high,critical"
+nuclei_max_urls: 40
+dalfox_timeout: 300
+dalfox_max_targets: 40
+sqlmap_timeout: 300
+sqlmap_max_targets: 10
+sqlmap_probe_leadless: false   # also test a few crawler params when sqli found nothing
+arjun_timeout: 180
+arjun_max_urls: 10
+gitleaks_timeout: 180
+gitleaks_max_js: 30
+# OWASP ZAP. lopata attaches to a daemon already running at zap_api, or (when
+# zap_autostart) spawns its own on a free port and tears it down at scan end.
+zap_api: "http://127.0.0.1:8080"
+zap_api_key: null         # left null on autostart -> a random key is generated
+zap_active: false         # spider + passive only unless you enable active scan
+zap_timeout: 600
+zap_autostart: true       # false = require a pre-running daemon (attach only)
+zap_cmd: null             # explicit launcher path; else autodetect zap.sh/zap
+zap_start_timeout: 90     # seconds to wait for the spawned daemon's API
+
+# XSS engine (optional).
+xss_headless: true            # use Playwright/Chromium to confirm execution if installed
+xss_stored: true
+xss_max_dom_urls: 15
+# Headless auth reuse: the scanner's session cookies (from --auth-cookie and the
+# crawl) are always shared with the browser. Optionally import/export a
+# Playwright storage_state.json so DOM/stored-XSS checks run authenticated.
+xss_storage_state: null       # path to import (e.g. from `playwright codegen`)
+xss_storage_state_out: null   # path to write the effective state for reuse
+xss_blind_callback: null      # external callback base, e.g. https://xss.mysrv.example
+
+# Blind-XSS out-of-band listener (optional). When enabled, lopata runs its own
+# callback server, plants a unique token per injection point, and promotes any
+# callback it catches to a CONFIRMED finding in the report. Also on the CLI as
+# --blind-xss-listen / --blind-xss-wait.
+xss_blind_listener: false     # start the built-in listener
+xss_blind_listen_host: "0.0.0.0"
+xss_blind_listen_port: 0      # 0 = ephemeral. Set xss_blind_callback to a public
+                              # URL if the listener sits behind a tunnel/NAT.
+xss_blind_wait: 0             # seconds to hold the scan open for late callbacks
 
 # Authenticated scan (optional). Prefer --auth-cookie / --auth-header on the CLI
 # so secrets stay out of committed config files.

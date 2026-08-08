@@ -132,3 +132,8 @@ def _check_form(ctx, form) -> bool:
 
 def _looks_like_token(value: str) -> bool:
     return len(value) >= 16 and bool(re.search(r"[A-Za-z0-9_\-]{16,}", value))
+
+
+def register():
+    from ..core.plugins import web_module
+    return web_module('csrf', run, requires_crawl=True, order=100)

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import re
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urldefrag, urljoin, urlparse
 from xml.etree import ElementTree as ET
 
@@ -27,6 +26,8 @@ try:
 except ImportError:
     BeautifulSoup = None
 
+from ..core import async_http
+from ..core.async_http import AsyncFetcher
 from ..core.baseline import ResponseSnapshot, similarity
 from ..core.models import (AREA_SURFACE, Confidence, Effort, Finding,
                            FindingType, Severity)
@@ -101,13 +102,23 @@ def run(ctx, phase=None) -> None:
     seeds += [(u, 1) for u in _read_sitemaps(ctx, base, sitemaps)]
     phase and phase.step(4)
 
-    visited = _bfs(ctx, seeds, allowed, depth_limit, phase)
-    js_found = _crawl_javascript(ctx, allowed, phase)
-    guessed = _content_discovery(ctx, allowed, phase)
+    # Fetch-heavy discovery runs on the async fetcher under one event loop and
+    # one client, sharing the concurrency cap (ctx.threads) via a semaphore.
+    visited, js_found, guessed = async_http.run(
+        _discover(ctx, seeds, allowed, depth_limit, phase))
 
     phase and phase.done()
     _report(ctx, base, allowed, len(visited), len(robots_paths), len(sitemaps),
             js_found, guessed)
+
+
+async def _discover(ctx, seeds, allowed, depth_limit, phase):
+    """Run BFS, JavaScript mining and content discovery on one async client."""
+    async with AsyncFetcher.from_ctx(ctx) as fetcher:
+        visited = await _bfs(ctx, fetcher, seeds, allowed, depth_limit, phase)
+        js_found = await _crawl_javascript(ctx, fetcher, allowed, phase)
+        guessed = await _content_discovery(ctx, fetcher, allowed, phase)
+    return visited, js_found, guessed
 
 
 # --------------------------------------------------------------------------
@@ -187,35 +198,56 @@ def _read_sitemaps(ctx, base, declared: list[str]) -> list[str]:
     return urls
 
 
-def _bfs(ctx, seeds, allowed, depth_limit, phase) -> set[str]:
-    """Breadth-first walk of HTML, bounded by max_pages and crawl depth."""
+async def _bfs(ctx, fetcher, seeds, allowed, depth_limit, phase) -> set[str]:
+    """Breadth-first walk of HTML, bounded by max_pages and crawl depth.
+
+    Each depth level is fetched concurrently through the async fetcher; links
+    extracted from the responses form the next level. This replaces the old
+    single-URL-per-thread loop while preserving the max_pages/depth bounds and
+    the redirect-following behaviour of the synchronous session.
+    """
     seen: set[str] = set()
-    queue: deque[tuple[str, int]] = deque(seeds)
-
-    while queue and len(seen) < ctx.max_pages:
-        url, depth = queue.popleft()
+    queued: set[str] = set()
+    frontier: list[tuple[str, int]] = []
+    for url, depth in seeds:
         url, _ = urldefrag(url)
-        if url in seen or not _in_scope(url, allowed):
+        if url in queued or not _in_scope(url, allowed):
             continue
-        seen.add(url)
-        try:
-            resp = ctx.session.get(url, timeout=ctx.timeout)
-        except requests.RequestException:
-            continue
-        phase and phase.step()
+        queued.add(url)
+        frontier.append((url, depth))
 
-        ctx.discovered_urls.add(resp.url if resp.url else url)
-        ctype = resp.headers.get("Content-Type", "").lower()
-        if "html" not in ctype:
-            continue
-        body = resp.text or ""
-        ctx.page_bodies[url] = body[:200000]
+    while frontier and len(seen) < ctx.max_pages:
+        batch: list[tuple[str, int]] = []
+        for url, depth in frontier:
+            if len(seen) + len(batch) >= ctx.max_pages:
+                break
+            if url in seen:
+                continue
+            batch.append((url, depth))
+        for url, _ in batch:
+            seen.add(url)
 
-        if depth >= depth_limit:
-            continue
-        for link in _links_from_html(url, body, ctx):
-            if link not in seen and _in_scope(link, allowed):
-                queue.append((link, depth + 1))
+        results = dict(await fetcher.get_many([u for u, _ in batch],
+                                              allow_redirects=True))
+        next_frontier: list[tuple[str, int]] = []
+        for url, depth in batch:
+            resp = results.get(url)
+            phase and phase.step()
+            if resp is None:
+                continue
+            ctx.discovered_urls.add(str(resp.url) if resp.url else url)
+            ctype = resp.headers.get("Content-Type", "").lower()
+            if "html" not in ctype:
+                continue
+            body = resp.text or ""
+            ctx.page_bodies[url] = body[:200000]
+            if depth >= depth_limit:
+                continue
+            for link in _links_from_html(url, body, ctx):
+                if link not in seen and link not in queued and _in_scope(link, allowed):
+                    queued.add(link)
+                    next_frontier.append((link, depth + 1))
+        frontier = next_frontier
     return seen
 
 
@@ -253,7 +285,7 @@ def _links_from_html(page_url: str, body: str, ctx) -> list[str]:
     return cleaned
 
 
-def _crawl_javascript(ctx, allowed, phase) -> int:
+async def _crawl_javascript(ctx, fetcher, allowed, phase) -> int:
     """Pull endpoint strings out of script files and inline scripts.
 
     Single-page applications put their entire route table and API surface in
@@ -262,22 +294,11 @@ def _crawl_javascript(ctx, allowed, phase) -> int:
     script_urls = sorted(ctx._script_urls)[:40]
     bodies: list[tuple[str, str]] = list(ctx._inline_js)
 
-    def fetch(url):
-        try:
-            resp = ctx.session.get(url, timeout=ctx.timeout)
-        except requests.RequestException:
-            return None
-        if resp.status_code != 200:
-            return None
-        return (url, (resp.text or "")[:400000])
-
     if script_urls:
-        with ThreadPoolExecutor(max_workers=min(ctx.threads, 8)) as pool:
-            for fut in as_completed([pool.submit(fetch, u) for u in script_urls]):
-                got = fut.result()
-                if got:
-                    bodies.append(got)
-                    ctx.discovered_urls.add(got[0])
+        for url, resp in await fetcher.get_many(script_urls, allow_redirects=True):
+            if resp is not None and resp.status_code == 200:
+                bodies.append((url, (resp.text or "")[:400000]))
+                ctx.discovered_urls.add(url)
         phase and phase.step(5)
 
     candidates: set[str] = set()
@@ -306,7 +327,7 @@ def _crawl_javascript(ctx, allowed, phase) -> int:
     return found
 
 
-def _content_discovery(ctx, allowed, phase) -> list[tuple[str, int, str]]:
+async def _content_discovery(ctx, fetcher, allowed, phase) -> list[tuple[str, int, str]]:
     """Probe a focused wordlist, validating every hit against the baseline."""
     if not ctx.config.get("content_discovery", True):
         return []
@@ -319,41 +340,42 @@ def _content_discovery(ctx, allowed, phase) -> list[tuple[str, int, str]]:
     base = ctx.target.rstrip("/") + "/"
     hits: list[tuple[str, int, str]] = []
 
-    def probe(path: str):
-        url = urljoin(base, path)
-        try:
-            resp = ctx.session.get(url, timeout=ctx.timeout, allow_redirects=False)
-        except requests.RequestException:
-            return None
-        if resp.status_code >= 400:
-            return None
-        if resp.is_redirect:
-            # A redirect to the login page is the usual "nothing here" answer.
-            location = resp.headers.get("Location", "")
-            return (url, resp.status_code, f"redirect -> {location}") \
-                if resp.status_code in (301, 302, 307, 308) and location else None
-        snap = ResponseSnapshot.capture(resp)
-        if baseline is not None:
-            if baseline.looks_like_not_found(snap):
-                return None
-            root = getattr(baseline, "root", None)
-            if root is not None and similarity(snap.body, root.body) >= 0.98:
-                return None
-        title = _title_of(resp.text or "")
-        return (url, resp.status_code, title)
-
-    with ThreadPoolExecutor(max_workers=ctx.threads) as pool:
-        futures = {pool.submit(probe, path): path for path in wordlist}
-        for fut in as_completed(futures):
-            result = fut.result()
-            phase and phase.step()
-            if result is None:
-                continue
-            hits.append(result)
-            ctx.discovered_urls.add(result[0])
+    probe_urls = [urljoin(base, path) for path in wordlist]
+    for url, resp in await fetcher.get_many(probe_urls, allow_redirects=False):
+        phase and phase.step()
+        result = _classify_probe(baseline, url, resp)
+        if result is None:
+            continue
+        hits.append(result)
+        ctx.discovered_urls.add(result[0])
 
     _report_admin_surfaces(ctx, hits)
     return hits
+
+
+def _classify_probe(baseline, url: str, resp):
+    """Decide whether a content-discovery probe response is a real hit.
+
+    A missing response or a 4xx/5xx is nothing; a redirect is reported only when
+    it carries a Location; a 2xx/3xx body is compared against the learned
+    not-found and root baselines so a soft-404 or a site that answers 200 for
+    everything does not manufacture phantom URLs.
+    """
+    if resp is None or resp.status_code >= 400:
+        return None
+    if resp.is_redirect:
+        location = resp.headers.get("Location", "")
+        return (url, resp.status_code, f"redirect -> {location}") \
+            if resp.status_code in (301, 302, 307, 308) and location else None
+    snap = ResponseSnapshot.capture(resp)
+    if baseline is not None:
+        if baseline.looks_like_not_found(snap):
+            return None
+        root = getattr(baseline, "root", None)
+        if root is not None and similarity(snap.body, root.body) >= 0.98:
+            return None
+    title = _title_of(resp.text or "")
+    return (url, resp.status_code, title)
 
 
 # --------------------------------------------------------------------------
@@ -511,3 +533,8 @@ def _extract_forms(ctx, page_url: str, soup) -> None:
             "inputs": inputs,
             "html": str(form)[:2000],
         })
+
+
+def register():
+    from ..core.plugins import web_module
+    return web_module('crawler', run, requires_crawl=False, order=0)

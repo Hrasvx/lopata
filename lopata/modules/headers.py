@@ -488,3 +488,8 @@ def _info_leak_headers(ctx, present, url) -> None:
         confidence=Confidence.HIGH,
     ))
     ctx.add_finding(finding)
+
+
+def register():
+    from ..core.plugins import web_module
+    return web_module('headers', run, requires_crawl=False, order=30)

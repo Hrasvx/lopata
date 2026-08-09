@@ -52,9 +52,7 @@ def generate_html_report(ctx, path: str, meta: dict) -> None:
     findings = list(ctx.findings)
     scores = ctx.scores or {}
 
-    # Stamp a stable index on each finding up front, in the same type/priority
-    # order the Detailed Findings section renders them, so the remediation table
-    # (rendered earlier) can deep-link to the right anchor.
+    # stamp a stable index on each finding so the remediation table can link it
     _stamp_indices(findings)
 
     parts: list[str] = []
@@ -78,9 +76,6 @@ def generate_html_report(ctx, path: str, meta: dict) -> None:
         fh.write("".join(parts))
 
 
-# --------------------------------------------------------------------------
-# Small helpers
-# --------------------------------------------------------------------------
 
 def _esc(text) -> str:
     return html.escape(str(text if text is not None else ""))
@@ -105,9 +100,6 @@ def _finding_slug(index: int) -> str:
     return f"finding-{index}"
 
 
-# --------------------------------------------------------------------------
-# Head / styles
-# --------------------------------------------------------------------------
 
 def _head(ctx) -> str:
     title = f"lopata assessment — {ctx.target}"
@@ -183,6 +175,12 @@ table.data.sortable th::after{content:"\\2195";opacity:.35;margin-left:6px;font-
 
 .summary-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));
   gap:10px;margin:14px 0}
+.incomplete-banner{background:#fef3c7;border:1px solid #f59e0b;
+  border-left:5px solid #f59e0b;border-radius:8px;padding:12px 14px;
+  margin:14px 0;color:#78350f;font-size:13px}
+.coverage-flag{display:inline-block;background:#fef3c7;color:#78350f;
+  border:1px solid #f59e0b;border-radius:6px;padding:1px 6px;font-size:11px;
+  font-weight:700;margin-left:6px}
 .tile{background:var(--panel);border:1px solid var(--rule);border-radius:10px;
   padding:12px 14px}
 .tile .n{font-size:24px;font-weight:800;line-height:1}
@@ -246,9 +244,6 @@ details.raw>summary{cursor:pointer;padding:10px 0;font-weight:600}
 """
 
 
-# --------------------------------------------------------------------------
-# Cover & executive summary
-# --------------------------------------------------------------------------
 
 def _cover(parts, ctx, findings, meta, scores) -> None:
     overall = scores.get("overall")
@@ -301,6 +296,13 @@ def _cover(parts, ctx, findings, meta, scores) -> None:
 
 def _executive_summary(parts, ctx, findings, scores) -> None:
     parts.append("<h1>Executive Summary</h1>")
+
+    # completeness first: everything below is only as good as the coverage
+    completeness = scores.get("scan_completeness") or {}
+    banner = completeness.get("banner")
+    if banner:
+        parts.append(f'<div class="incomplete-banner"><b>Incomplete scan</b><br/>'
+                     f'{_esc(banner)}</div>')
 
     confirmed_vulns = [f for f in findings if f.ftype is FindingType.CONFIRMED_VULN]
     potential = [f for f in findings if f.ftype is FindingType.POTENTIAL_VULN]
@@ -379,9 +381,6 @@ def _executive_summary(parts, ctx, findings, scores) -> None:
         parts.append("</ul>")
 
 
-# --------------------------------------------------------------------------
-# Scores
-# --------------------------------------------------------------------------
 
 def _score_section(parts, scores) -> None:
     categories = scores.get("categories") or {}
@@ -424,9 +423,6 @@ def _score_section(parts, scores) -> None:
     parts.append("</tbody></table>")
 
 
-# --------------------------------------------------------------------------
-# Technology & attack surface
-# --------------------------------------------------------------------------
 
 def _technology_section(parts, ctx) -> None:
     if not ctx.technologies:
@@ -492,9 +488,6 @@ def _attack_surface_section(parts, ctx) -> None:
                      + ", ".join(_esc(s) for s in shown) + more + "</p>")
 
 
-# --------------------------------------------------------------------------
-# Priorities & overview
-# --------------------------------------------------------------------------
 
 def _priorities(parts, findings) -> None:
     actionable = [f for f in findings if f.severity >= Severity.LOW
@@ -569,9 +562,6 @@ def _findings_overview(parts, findings) -> None:
     parts.append("</tbody></table>")
 
 
-# --------------------------------------------------------------------------
-# Detailed findings (interactive)
-# --------------------------------------------------------------------------
 
 _INDEX_ATTR = "_html_index"
 
@@ -657,10 +647,12 @@ def _one_finding(parts, index, f) -> None:
         f'data-conf="{f.confidence.name}" data-confrank="{int(f.confidence)}" '
         f'data-type="{f.ftype.name}" data-vuln="{1 if f.is_vulnerability else 0}" '
         f'data-text="{_esc(text_blob)}">')
+    coverage_flag = ('<span class="coverage-flag">incomplete evidence</span>'
+                     if f.incomplete_coverage else "")
     parts.append(
         f'<summary><span class="fnum">{index}.</span>'
         f'<span class="fname">{_esc(f.name)}</span>{_sev_badge(f.severity)}'
-        f"{_conf_badge(f.confidence)}</summary>")
+        f"{_conf_badge(f.confidence)}{coverage_flag}</summary>")
     parts.append('<div class="body">')
 
     parts.append(
@@ -725,9 +717,6 @@ def _block(parts, label, text) -> None:
     parts.append(f"<h3>{_esc(label)}</h3><p>{_multiline(text)}</p>")
 
 
-# --------------------------------------------------------------------------
-# Passed checks & appendix
-# --------------------------------------------------------------------------
 
 def _passed_checks(parts, ctx) -> None:
     if not ctx.passed_checks:
@@ -793,9 +782,6 @@ def _appendix(parts, ctx, meta) -> None:
                  + "</div>")
 
 
-# --------------------------------------------------------------------------
-# Client-side interactivity
-# --------------------------------------------------------------------------
 
 def _script() -> str:
     return "<script>" + _JS + "</script>"

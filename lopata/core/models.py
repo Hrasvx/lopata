@@ -8,6 +8,8 @@ from typing import Optional
 
 import requests
 
+from .tool_status import ToolStatusRegistry
+
 
 class Severity(IntEnum):
 
@@ -129,8 +131,7 @@ CONFIDENCE_HEX = {
 }
 
 
-# Scoring areas a finding can be charged against. Kept small on purpose so the
-# report's category scores stay meaningful.
+# scoring areas a finding can be charged against
 AREA_TLS = "TLS"
 AREA_HTTP = "HTTP Security"
 AREA_SURFACE = "Attack Surface"
@@ -180,8 +181,11 @@ class Finding:
     sources: list[str] = field(default_factory=list)
     related_locations: list[str] = field(default_factory=list)
     score_area: str = AREA_CONFIG
-    # Set when lopata re-tested the issue itself rather than trusting a tool.
+    # set when lopata re-tested the issue itself rather than trusting a tool
     verified_by: str = ""
+    # external tools whose output backs this finding (filled in by correlation)
+    contributing_tools: list[str] = field(default_factory=list)
+    incomplete_coverage: bool = False
 
     def __post_init__(self) -> None:
         if not self.sources and self.module:
@@ -251,6 +255,8 @@ class Finding:
             "response": self.response,
             "module": self.module,
             "sources": self.sources,
+            "contributing_tools": self.contributing_tools,
+            "incomplete_coverage": self.incomplete_coverage,
         }
 
 
@@ -355,16 +361,17 @@ class ScanContext:
     page_bodies: dict[str, str] = field(default_factory=dict)
     modules_run: list[str] = field(default_factory=list)
     tools: dict[str, ToolInfo] = field(default_factory=dict)
+    # how each external tool invocation ended
+    tool_status: "ToolStatusRegistry" = field(default_factory=lambda: ToolStatusRegistry())
+    retry_supervisor: object = None
 
     technologies: dict[str, Technology] = field(default_factory=dict)
     services: list[Service] = field(default_factory=list)
-    # Client-side routes recovered from JavaScript bundles (SPA targets).
+    # client-side routes recovered from JavaScript bundles (SPA targets)
     spa_routes: list[str] = field(default_factory=list)
-    # Hosts confirmed to be answering HTTP (populated by httpx); used to avoid
-    # scanning subdomains that only resolve in DNS but serve nothing.
+    # hosts confirmed to be answering HTTP (populated by httpx)
     live_hosts: set[str] = field(default_factory=set)
-    # Hidden HTTP parameters found by Arjun, keyed by the URL they belong to.
-    # Fed to the injection-testing tools that run after discovery.
+    # hidden HTTP paramaters found by Arjun, keyed by the URL they belong to
     discovered_params: dict[str, set] = field(default_factory=dict)
     # tool name -> raw stdout, reproduced verbatim in the report appendix
     raw_outputs: dict[str, str] = field(default_factory=dict)
@@ -373,8 +380,6 @@ class ScanContext:
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _cleanups: list = field(default_factory=list, repr=False)
     _form_sigs: set = field(default_factory=set, repr=False)
-    # Script sources and inline script bodies collected while crawling, mined
-    # afterwards for endpoints the HTML never links to.
     _script_urls: set = field(default_factory=set, repr=False)
     _inline_js: list = field(default_factory=list, repr=False)
 

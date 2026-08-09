@@ -6,6 +6,16 @@ timeout: 10.0
 max_pages: 100
 verify_tls: true
 
+# Egress proxy for lopata's own HTTP(S) traffic (external tools are unaffected).
+# null = direct. http/https for Burp/ZAP; socks5h for Tor (needs the [socks]
+# extra). Also on the CLI as --proxy. When proxying to an intercepting proxy you
+# usually also want verify_tls:false (--insecure), since it presents its own CA.
+proxy: null                # e.g. "http://127.0.0.1:8080" or "socks5h://127.0.0.1:9050"
+# Override the User-Agent both HTTP layers send. null keeps the honest,
+# self-identifying default. --anonymous swaps in a generic browser string and
+# requires a proxy. Also on the CLI as --user-agent.
+user_agent: null
+
 # Response-similarity threshold for the not-found baseline (0..1). Higher = more
 # aggressive at treating pages as "same as absent" (fewer false positives, but
 # risks masking a real hit on very templated sites).
@@ -43,7 +53,21 @@ tools:
   zap: true          # OWASP ZAP DAST via API (needs a running ZAP daemon)
   gitleaks: true     # secret scanning of JS/HTML/config (trufflehog fallback)
 
-# Per-tool tuning (optional).
+# Retry orchestration. When a tool times out or dies, its findings are lost and
+# everything that rested on it has to be reported as unverified — so lopata
+# gives it another go with a longer budget before accepting that. A missing
+# binary (skipped_missing) is never retried; there is nothing to retry.
+#   --no-retry           restores the old single-attempt behaviour
+#   --max-tool-timeout   caps how far the timeout is allowed to grow
+retry:
+  max_attempts: 2          # total attempts, including the first
+  timeout_multiplier: 2.0  # attempt N runs at base_timeout * multiplier^(N-1)
+  retry_on: [timed_out, failed]
+  backoff_seconds: 2.0     # pause between attempts
+  max_tool_timeout: null   # e.g. 1800 to never let an attempt exceed 30 min
+
+# Per-tool tuning (optional). Each *_timeout below is the *base* timeout: the
+# first attempt's budget, which the retry policy above may grow.
 nmap_fast: true       # top-100 ports only
 nmap_vuln: true       # run --script vuln
 nmap_timeout: 300        # overall budget; nmap is told to stop 30s earlier

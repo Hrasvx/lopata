@@ -9,6 +9,11 @@ from urllib3.util.retry import Retry
 
 DEFAULT_USER_AGENT = "lopata/1.0 (+authorized-security-testing)"
 
+ANON_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
 
 def normalize_target(raw: str) -> str:
     raw = raw.strip()
@@ -31,10 +36,12 @@ def build_session(
     verify_tls: bool = True,
     auth_headers: dict | None = None,
     auth_cookies: dict | None = None,
+    proxy: str | None = None,
+    user_agent: str | None = None,
 ) -> requests.Session:
     session = requests.Session()
     session.headers.update({
-        "User-Agent": DEFAULT_USER_AGENT,
+        "User-Agent": user_agent or DEFAULT_USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
     })
@@ -44,6 +51,8 @@ def build_session(
         session.cookies.update(auth_cookies)
 
     session.verify = verify_tls
+    if proxy:
+        session.proxies.update({"http": proxy, "https": proxy})
 
     retry = Retry(
         total=retries,

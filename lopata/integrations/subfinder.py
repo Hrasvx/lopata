@@ -46,7 +46,8 @@ def run(ctx, phase=None) -> None:
     else:
         argv = [info.path, "-d", domain, "-silent"]
     proc = run_tool(argv, timeout=int(ctx.config.get("subfinder_timeout", 120)),
-                    logger=ctx.logger)
+                    logger=ctx.logger,
+                    ctx=ctx, tool="subfinder")
     phase and phase.step()
     if proc is None:
         return

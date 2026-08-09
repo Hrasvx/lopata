@@ -13,11 +13,12 @@ DEFAULTS = {
     "max_pages": 100,
     "verify_tls": True,
     "baseline_threshold": 0.92,
-    # HTTP fan-out (async layer). retries mirrors the old urllib3 Retry total;
-    # rate_limit is requests/second across the whole scan (None = uncapped, the
-    # historical behaviour where concurrency was the only throttle).
+    # rate_limit is requests/second across the whole scan (None = uncapped)
     "retries": 1,
     "rate_limit": None,
+    # http://, https:// and socks5:// (socks5h:// resolves DNS through the proxy)
+    "proxy": None,
+    "user_agent": None,
 
     # Content discovery
     "crawl_depth": 3,
@@ -57,29 +58,28 @@ DEFAULTS = {
     "zap_api_key": None,
     "zap_active": False,          # passive/spider only unless explicitly enabled
     "zap_timeout": 600,
-    # ZAP lifecycle: attach to a running daemon at zap_api if present, else
-    # spawn one (when zap_autostart) and tear it down at scan end. zap_cmd
-    # overrides binary autodetection (zap.sh / zap / owasp-zap / zaproxy).
     "zap_autostart": True,
     "zap_cmd": None,
     "zap_start_timeout": 90,      # seconds to wait for the daemon API to come up
 
-    # Blind XSS out-of-band callbacks. xss_blind_listener starts a built-in
-    # server that mints per-injection tokens and correlates hits into the
-    # report; xss_blind_callback is an external callback URL used instead (or
-    # advertised in place of the listener's own, e.g. behind a tunnel).
+    # Blind XSS out-of-band callbacks
     "xss_blind_listener": False,
     "xss_blind_listen_host": "0.0.0.0",
     "xss_blind_listen_port": 0,   # 0 = ephemeral port
     "xss_blind_callback": None,
     "xss_blind_wait": 0,          # seconds to hold the scan open for late hits
 
-    # Headless (Playwright) auth reuse. The scanner's session cookies are always
-    # bridged into the browser for DOM/stored-XSS verification; xss_storage_state
-    # imports a Playwright storage_state.json on top, and xss_storage_state_out
-    # writes the effective state back out for reuse.
+    # Headless (Playwright) auth reuse
     "xss_storage_state": None,
     "xss_storage_state_out": None,
+
+    "retry": {
+        "max_attempts": 2,          # total attempts, including the first
+        "timeout_multiplier": 2.0,  # attempt N gets base_timeout * mult^(N-1)
+        "retry_on": ["timed_out", "failed"],
+        "backoff_seconds": 2.0,
+        "max_tool_timeout": None,
+    },
 
     "modules": None,
 
@@ -100,6 +100,32 @@ DEFAULTS = {
     },
     "auth": {"headers": [], "cookie": None},
 }
+
+
+# config key holding each tool's base timeout, used for the ETA fallback
+TOOL_TIMEOUT_KEYS = {
+    "nmap": "nmap_timeout",
+    "nikto": "nikto_timeout",
+    "sslscan": "ssl_timeout",
+    "whatweb": "whatweb_timeout",
+    "subfinder": "subfinder_timeout",
+    "httpx": "httpx_timeout",
+    "ffuf": "ffuf_timeout",
+    "nuclei": "nuclei_timeout",
+    "dalfox": "dalfox_timeout",
+    "sqlmap": "sqlmap_timeout",
+    "arjun": "arjun_timeout",
+    "gitleaks": "gitleaks_timeout",
+    "zap": "zap_timeout",
+}
+
+
+def tool_base_timeout(cfg: dict, tool: str, default: float = 60.0) -> float:
+    key = TOOL_TIMEOUT_KEYS.get(tool)
+    try:
+        return float(cfg.get(key, default)) if key else float(default)
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def load_config(path: str | None) -> dict:

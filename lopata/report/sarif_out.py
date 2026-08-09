@@ -26,9 +26,6 @@ SARIF_SCHEMA = ("https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/"
                 "Schemas/sarif-schema-2.1.0.json")
 INFORMATION_URI = "https://github.com/hrasvx/lopata"
 
-# SARIF has three result levels; map our five severities onto them. GitHub then
-# refines the ordering from ``security-severity`` below, so this only decides
-# error vs. warning vs. note in the Actions annotations.
 _LEVEL = {
     Severity.CRITICAL: "error",
     Severity.HIGH: "error",
@@ -37,8 +34,6 @@ _LEVEL = {
     Severity.INFO: "note",
 }
 
-# GitHub's numeric severity (0.0-10.0) when a finding carries no CVSS of its
-# own. Aligned with GitHub's own CVSS bands: >=9 critical, >=7 high, >=4 medium.
 _SECURITY_SEVERITY = {
     Severity.CRITICAL: 9.5,
     Severity.HIGH: 8.0,
@@ -47,8 +42,6 @@ _SECURITY_SEVERITY = {
     Severity.INFO: 1.0,
 }
 
-# location strings that already look like "some/file.py:123" — captured so a
-# real line number survives into the SARIF region.
 _FILE_LINE = re.compile(r"^(?P<path>[^\s?#]+?):(?P<line>\d+)$")
 
 
@@ -152,8 +145,6 @@ def _build_result(finding, rule_index: int) -> dict:
         "message": {"text": _message(finding)},
         "locations": [_location(finding)],
         "partialFingerprints": {
-            # Stable across runs: module + name + location, matching the JSON
-            # report's dedup key, so GitHub keeps one alert per real issue.
             "lopataFingerprint/v1": "|".join((
                 finding.module or "", finding.name, finding.location or "")),
         },
@@ -192,8 +183,6 @@ def write_sarif(ctx, path: str, meta: dict, version: str) -> None:
             rule_index[rid] = len(rules)
             rules.append(_build_rule(finding))
         else:
-            # Keep the most severe defaultConfiguration/security-severity seen
-            # for a shared rule, so the Security tab does not understate it.
             existing = rules[rule_index[rid]]
             new_ss = float(_build_rule(finding)["properties"]["security-severity"])
             old_ss = float(existing["properties"]["security-severity"])

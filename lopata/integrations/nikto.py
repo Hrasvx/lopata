@@ -44,7 +44,8 @@ def run(ctx, phase=None) -> None:
         if not ctx.config.get("verify_tls", True):
             argv += ["-nossl"] if ctx.target.startswith("http://") else []
         proc = run_tool(argv, timeout=int(ctx.config.get("nikto_timeout", 240)),
-                        logger=ctx.logger)
+                        logger=ctx.logger,
+                        ctx=ctx, tool="nikto")
         phase and phase.step()
         raw = read_output()
 
@@ -58,8 +59,6 @@ def run(ctx, phase=None) -> None:
     items = _parse_json(raw)
     kept = dropped = 0
     for item in items:
-        # One malformed item must not cost us the whole batch — nikto's JSON
-        # field types are not consistent between versions.
         try:
             handled = _handle(ctx, item)
         except Exception as exc:
@@ -97,9 +96,6 @@ def _parse_json(text: str) -> list[dict]:
     return data.get("vulnerabilities", []) or []
 
 
-# --------------------------------------------------------------------------
-# Message classification
-# --------------------------------------------------------------------------
 
 class _Rule:
     """One recognised class of nikto message."""
@@ -254,7 +250,6 @@ def _match_rule(msg: str) -> _Rule:
     return _GENERIC
 
 
-# --------------------------------------------------------------------------
 
 def _handle(ctx, item: dict) -> bool:
     url = item.get("url") or ""
@@ -297,8 +292,6 @@ def _handle(ctx, item: dict) -> bool:
         confidence = Confidence.LOW
         verified_by = ""
 
-    # Several nikto messages ("This might be interesting.") are meaningless
-    # without the path they refer to, so put it in the title.
     name = rule.name or _short(msg)
     path = urlparse(full).path
     if not rule.name and path not in ("", "/") and len(msg) < 60:
@@ -363,9 +356,6 @@ def _reverify(ctx, url: str) -> tuple[str, str]:
         if baseline.looks_like_not_found(snap):
             return "absent", detail + " (matches the soft-404 baseline)"
         root = getattr(baseline, "root", None)
-        # Catch-all routing serves the homepage for every path, which makes a
-        # 200 meaningless. This only tells us anything for paths *other* than
-        # the root — a finding about the homepage is naturally identical to it.
         if (root is not None and not _is_root(url)
                 and similarity(snap.body, root.body) >= 0.98):
             return "absent", detail + " (identical to the site homepage)"

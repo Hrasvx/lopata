@@ -3,6 +3,13 @@ from __future__ import annotations
 import json
 
 from ..core.correlate import summarize
+from ..core.scoring import completeness as _scan_completeness
+
+
+def _completeness(ctx) -> dict:
+    """Prefer what scoring already computed; recompute if scoring was skipped."""
+    stored = (ctx.scores or {}).get("scan_completeness")
+    return stored if stored else _scan_completeness(ctx)
 
 
 def write_json(ctx, path: str, meta: dict, version: str) -> None:
@@ -28,6 +35,9 @@ def write_json(ctx, path: str, meta: dict, version: str) -> None:
                    "path": t.path, "note": t.note}
             for name, t in ctx.tools.items()
         },
+        "scan_completeness": _completeness(ctx),
+        "tool_runs": {name: s.as_dict()
+                      for name, s in ctx.tool_status.statuses().items()},
         "scores": ctx.scores,
         "summary": summarize(findings),
         "technologies": [t.as_dict() for t in sorted(

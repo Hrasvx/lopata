@@ -120,8 +120,6 @@ def _check_form(ctx, form) -> bool:
         exploitability=Exploitability.MODERATE,
         auth=AuthRequirement.USER,
         exposure=Exposure.PUBLIC,
-        # Absence of a token in markup is observed; that the endpoint is
-        # actually forgeable is not.
         confidence=Confidence.MEDIUM,
         notes=["based on form markup only — server-side origin checks would "
                "not be visible to this test"],

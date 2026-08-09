@@ -29,9 +29,11 @@ from urllib.parse import urlparse
 
 from ..core.models import (AREA_CONFIG, AREA_HTTP, AREA_WEBAPP, Confidence,
                            Effort, Finding, FindingType, Severity, ToolInfo)
+from ..core.retry import supervise
 from ..core.severity import (AuthRequirement, Exploitability, Exposure, Impact,
                              SeverityFactors, apply)
-from .base import which
+from ..core.tool_status import ToolRunStatus, ToolStatus
+from .base import mark_skipped, which
 
 _DEFAULT_API = "http://127.0.0.1:8080"
 
@@ -101,9 +103,6 @@ def available(ctx):
     return info
 
 
-# --------------------------------------------------------------------------
-# Daemon lifecycle
-# --------------------------------------------------------------------------
 
 def _find_zap(ctx) -> str | None:
     explicit = ctx.config.get("zap_cmd")
@@ -127,8 +126,6 @@ def _resolve_bind(ctx) -> tuple[str, int]:
     api = str(ctx.config.get("zap_api", _DEFAULT_API))
     parsed = urlparse(api)
     host = parsed.hostname or "127.0.0.1"
-    # If the user left the API at its default, pick a free ephemeral port so we
-    # do not collide with whatever might hold 8080; honour an explicit setting.
     if api.rstrip("/") == _DEFAULT_API:
         return host, _free_port(host)
     return host, (parsed.port or 8080)
@@ -225,27 +222,54 @@ def shutdown(ctx) -> None:
 def run(ctx, phase=None) -> None:
     info = available(ctx)
     if not info.available:
+        mark_skipped(ctx, MODULE_NAME, info.note or "ZAP API not reachable")
         return
     ctx.modules_run.append(MODULE_NAME)
     budget = int(ctx.config.get("zap_timeout", 600))
-    deadline = time.monotonic() + budget
 
-    scan = _get(ctx, "/JSON/spider/action/scan/", url=ctx.target,
-                maxChildren=str(ctx.max_pages))
-    if scan and "scan" in scan:
-        _poll(ctx, "/JSON/spider/view/status/", scan["scan"], deadline)
-    phase and phase.step()
+    def attempt(timeout: float):
+        """One full spider (+ optional active scan) pass inside `timeout`.
 
-    if ctx.config.get("zap_active", False):
-        ascan = _get(ctx, "/JSON/ascan/action/scan/", url=ctx.target,
-                     recurse="true", inScopeOnly="false")
-        if ascan and "scan" in ascan:
-            _poll(ctx, "/JSON/ascan/view/status/", ascan["scan"], deadline)
-    phase and phase.step()
+        ZAP keeps its session between calls, so a retry with a longer budget
+        continues from the crawl the previous attempt got through rather than
+        starting over.
+        """
+        started = time.monotonic()
+        deadline = started + timeout
+        finished = True
 
-    alerts = _get(ctx, "/JSON/alert/view/alerts/", baseurl=ctx.target,
-                  start="0", count="1000") or {}
-    raw = alerts.get("alerts", []) or []
+        scan = _get(ctx, "/JSON/spider/action/scan/", url=ctx.target,
+                    maxChildren=str(ctx.max_pages))
+        if scan is None:
+            return None, ToolRunStatus(
+                tool_name=MODULE_NAME, status=ToolStatus.FAILED,
+                duration_s=time.monotonic() - started,
+                note="ZAP API stopped responding during the spider")
+        if "scan" in scan:
+            finished &= _poll(ctx, "/JSON/spider/view/status/", scan["scan"],
+                              deadline)
+        phase and phase.step()
+
+        if ctx.config.get("zap_active", False):
+            ascan = _get(ctx, "/JSON/ascan/action/scan/", url=ctx.target,
+                         recurse="true", inScopeOnly="false")
+            if ascan and "scan" in ascan:
+                finished &= _poll(ctx, "/JSON/ascan/view/status/",
+                                  ascan["scan"], deadline)
+        phase and phase.step()
+
+        alerts = _get(ctx, "/JSON/alert/view/alerts/", baseurl=ctx.target,
+                      start="0", count="1000") or {}
+        raw = alerts.get("alerts", []) or []
+        status = ToolStatus.COMPLETED if finished else ToolStatus.TIMED_OUT
+        return raw, ToolRunStatus(
+            tool_name=MODULE_NAME, status=status,
+            duration_s=time.monotonic() - started,
+            note=("" if finished else
+                  f"scan was still running when the {timeout:.0f}s budget ran out"))
+
+    raw, _status = supervise(ctx, MODULE_NAME, attempt, budget)
+    raw = raw or []
     if raw:
         ctx.add_raw_output("zap", _summarize_raw(raw))
 
@@ -264,17 +288,20 @@ def run(ctx, phase=None) -> None:
     phase and phase.done()
 
 
-def _poll(ctx, path: str, scan_id, deadline: float) -> None:
+def _poll(ctx, path: str, scan_id, deadline: float) -> bool:
+    """Wait for a ZAP scan to reach 100%. False means it never got there —
+    the budget ran out, or the API stopped answering."""
     while time.monotonic() < deadline:
         status = _get(ctx, path, scanId=str(scan_id))
         if not status:
-            return
+            return False
         try:
             if int(status.get("status", "0")) >= 100:
-                return
+                return True
         except (TypeError, ValueError):
-            return
+            return False
         time.sleep(2)
+    return False
 
 
 def _summarize_raw(alerts) -> str:

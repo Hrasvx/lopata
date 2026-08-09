@@ -51,9 +51,6 @@ def survived_chars(canary: str, body: str) -> set[str]:
     return out
 
 
-# --------------------------------------------------------------------------
-# Context classification
-# --------------------------------------------------------------------------
 
 _EVENT_ATTR = re.compile(r"\bon\w+\s*=\s*(\"|'|)([^\"'>]*)$", re.I)
 _URL_ATTR = re.compile(r"\b(?:href|src|action|formaction|data|poster)\s*=\s*"
@@ -126,9 +123,6 @@ def _script_context(script_prefix: str) -> tuple[str, str]:
     return "js_noquote", ""
 
 
-# --------------------------------------------------------------------------
-# Payload construction
-# --------------------------------------------------------------------------
 
 def _candidates(context: str, quote: str, token: str) -> list[tuple[set, str, bool]]:
     """(required-characters, payload, needs-user-interaction) for a context.

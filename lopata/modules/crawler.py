@@ -41,8 +41,6 @@ _SKIP_EXT = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".css", ".woff",
              ".woff2", ".ttf", ".pdf", ".zip", ".mp4", ".webp", ".eot", ".mp3",
              ".avi", ".mov", ".dmg", ".exe")
 
-# Paths worth asking for directly. Kept deliberately small and high-signal:
-# this is targeted discovery, not brute force.
 ADMIN_PATHS = (
     "admin", "admin/", "administrator/", "admin/login", "admin.php",
     "wp-admin/", "wp-login.php", "login", "login.php", "signin", "user/login",
@@ -102,8 +100,6 @@ def run(ctx, phase=None) -> None:
     seeds += [(u, 1) for u in _read_sitemaps(ctx, base, sitemaps)]
     phase and phase.step(4)
 
-    # Fetch-heavy discovery runs on the async fetcher under one event loop and
-    # one client, sharing the concurrency cap (ctx.threads) via a semaphore.
     visited, js_found, guessed = async_http.run(
         _discover(ctx, seeds, allowed, depth_limit, phase))
 
@@ -121,9 +117,6 @@ async def _discover(ctx, seeds, allowed, depth_limit, phase):
     return visited, js_found, guessed
 
 
-# --------------------------------------------------------------------------
-# Sources
-# --------------------------------------------------------------------------
 
 def _read_robots(ctx, base) -> tuple[list[str], list[str]]:
     """robots.txt is a map of what the owner would rather you did not visit."""
@@ -378,9 +371,6 @@ def _classify_probe(baseline, url: str, resp):
     return (url, resp.status_code, title)
 
 
-# --------------------------------------------------------------------------
-# Reporting
-# --------------------------------------------------------------------------
 
 _ADMIN_HINT = re.compile("|".join(re.escape(p.strip("/")) for p in ADMIN_PATHS),
                          re.I)
@@ -487,9 +477,6 @@ def _report(ctx, base, allowed, visited, robots_n, sitemaps_n, js_n, guessed) ->
     ))
 
 
-# --------------------------------------------------------------------------
-# Helpers
-# --------------------------------------------------------------------------
 
 def _in_scope(url: str, allowed: set[str]) -> bool:
     parsed = urlparse(url)

@@ -208,8 +208,6 @@ def _probe(ctx, baseline, probe: _Probe, resp) -> Finding | None:
             confidence = Confidence.LOW
             verified = ""
     else:
-        # No signature available: the path answered, but we cannot tell what
-        # it returned. Medium at best.
         confidence = Confidence.MEDIUM
         verified = "lopata fetched the path and received non-baseline content"
 

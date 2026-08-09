@@ -23,7 +23,7 @@ from ..core.models import (AREA_WEBAPP, Confidence, Effort, Finding,
                            FindingType, Severity)
 from ..core.severity import (AuthRequirement, Exploitability, Exposure, Impact,
                              SeverityFactors, apply)
-from .base import detect, run_tool, which
+from .base import detect, mark_skipped, run_tool, which
 
 MODULE_NAME = "gitleaks"
 CATEGORY = "Secret Exposure"
@@ -62,6 +62,8 @@ def run(ctx, phase=None) -> None:
     corpus = _collect_corpus(ctx)
     if not corpus:
         ctx.logger and ctx.logger.info("gitleaks: no client-side assets to scan")
+        mark_skipped(ctx, MODULE_NAME,
+                     "no local repo or client-side assets to scan")
         phase and phase.done()
         return
 
@@ -102,8 +104,6 @@ def _collect_corpus(ctx) -> list[tuple[str, str]]:
         if text:
             corpus.append((url + " (inline js)", text))
 
-    # Re-fetch a bounded number of external bundles: secrets in built JS are the
-    # highest-value target and the crawler did not retain their bodies.
     max_js = int(ctx.config.get("gitleaks_max_js", 30))
     for script_url in sorted(getattr(ctx, "_script_urls", set()))[:max_js]:
         try:
@@ -121,7 +121,8 @@ def _run_gitleaks(ctx, info, directory) -> list[dict]:
             "--report-format", "json", "--report-path", out_path,
             "--redact", "--exit-code", "0"]
     run_tool(argv, timeout=int(ctx.config.get("gitleaks_timeout", 180)),
-             logger=ctx.logger)
+             logger=ctx.logger,
+             ctx=ctx, tool="gitleaks")
     try:
         with open(out_path, encoding="utf-8") as fh:
             data = json.load(fh)
@@ -146,7 +147,8 @@ def _run_gitleaks(ctx, info, directory) -> list[dict]:
 def _run_trufflehog(ctx, info, directory) -> list[dict]:
     argv = [info.path, "filesystem", directory, "--json", "--no-update"]
     proc = run_tool(argv, timeout=int(ctx.config.get("gitleaks_timeout", 180)),
-                    logger=ctx.logger)
+                    logger=ctx.logger,
+                    ctx=ctx, tool="gitleaks")
     if proc is None or not proc.stdout.strip():
         return []
     ctx.add_raw_output("trufflehog", proc.stdout[:20000])

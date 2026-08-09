@@ -17,11 +17,30 @@ that issue one request at a time keep using it.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import threading
 import time
 from typing import Iterable, Optional
 
 import httpx
+
+
+def _proxy_kwarg(proxy: Optional[str]) -> dict:
+    """Return the AsyncClient proxy kwarg appropriate to the installed httpx.
+
+    httpx renamed the argument across the range lopata supports (``proxies=`` in
+    <0.28, ``proxy=`` from 0.26 on, with the plural removed in 0.28), so pick
+    whichever the running version's signature actually accepts.
+    """
+    if not proxy:
+        return {}
+    try:
+        params = inspect.signature(httpx.AsyncClient).parameters
+    except (ValueError, TypeError):
+        params = {}
+    if "proxy" in params:
+        return {"proxy": proxy}
+    return {"proxies": proxy}
 
 DEFAULT_USER_AGENT = "lopata/1.0 (+authorized-security-testing)"
 DEFAULT_HEADERS = {
@@ -33,8 +52,6 @@ DEFAULT_HEADERS = {
 # Same transient statuses the urllib3 Retry retried on, and the same backoff.
 _RETRY_STATUS = frozenset({502, 503, 504})
 _BACKOFF_FACTOR = 0.5
-# urllib3's Retry only retried idempotent methods by default; match that so a
-# POST payload is never silently re-sent.
 _IDEMPOTENT = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
@@ -77,7 +94,8 @@ class AsyncFetcher:
                  cookies: Optional[dict] = None, verify: bool = True,
                  timeout: float = 10.0, retries: int = 1, concurrency: int = 10,
                  rate_limit: Optional[float] = None,
-                 follow_redirects: bool = False) -> None:
+                 follow_redirects: bool = False,
+                 proxy: Optional[str] = None) -> None:
         self._headers = dict(DEFAULT_HEADERS)
         if headers:
             self._headers.update(headers)
@@ -88,6 +106,7 @@ class AsyncFetcher:
         self._concurrency = max(int(concurrency), 1)
         self._rate_limit = rate_limit
         self._follow = follow_redirects
+        self._proxy = proxy
         self._client: Optional[httpx.AsyncClient] = None
         self._sem: Optional[asyncio.Semaphore] = None
         self._rate: Optional[_RateLimiter] = None
@@ -112,6 +131,7 @@ class AsyncFetcher:
             retries=int(ctx.config.get("retries", 1)),
             concurrency=int(ctx.threads),
             rate_limit=ctx.config.get("rate_limit"),
+            proxy=ctx.config.get("proxy"),
         )
         params.update(overrides)
         return cls(**params)
@@ -121,7 +141,8 @@ class AsyncFetcher:
                               max_keepalive_connections=self._concurrency)
         self._client = httpx.AsyncClient(
             headers=self._headers, cookies=self._cookies, verify=self._verify,
-            timeout=self._timeout, follow_redirects=self._follow, limits=limits)
+            timeout=self._timeout, follow_redirects=self._follow, limits=limits,
+            **_proxy_kwarg(self._proxy))
         self._sem = asyncio.Semaphore(self._concurrency)
         self._rate = _RateLimiter(self._rate_limit)
         return self

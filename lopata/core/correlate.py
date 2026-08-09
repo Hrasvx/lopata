@@ -18,12 +18,9 @@ from collections import defaultdict
 from urllib.parse import urlparse
 
 from .models import Confidence, Finding, FindingType, Severity
-from .severity import cap_for
+from .severity import Impact, business_impact_for, cap_for
+from .tool_status import ToolStatus
 
-# Canonical issue identities. Different tools describe the same problem in
-# very different words; without this table "Missing header: X-Frame-Options"
-# and nikto's "The anti-clickjacking X-Frame-Options header is not present"
-# would be reported twice as if they were two problems.
 _ALIASES: list[tuple[re.Pattern, str]] = [
     (re.compile(r"x-frame-options|clickjack|frame-ancestors", re.I), "clickjacking"),
     (re.compile(r"content-security-policy|\bcsp\b", re.I), "csp"),
@@ -59,8 +56,6 @@ _ALIASES: list[tuple[re.Pattern, str]] = [
 ]
 
 
-# Locations that name a specific injection point, e.g.
-# "https://host/search?q=1 [param: q]" or "... [POST param: id]".
 _PER_PARAM = re.compile(r"\[(?:(\w+)\s+)?param:\s*([^\]]+)\]", re.I)
 
 
@@ -97,12 +92,14 @@ def correlate(ctx, logger=None) -> list[Finding]:
     """Collapse, corroborate and re-score ctx.findings in place."""
     findings = list(ctx.findings)
     before = len(findings)
+    registry = getattr(ctx, "tool_status", None)
 
     findings = _merge_same_location(findings)
     findings = _group_across_locations(findings)
     for finding in findings:
         _adjust_confidence(finding)
         _recap_severity(finding)
+        tag_contributing_tools(finding, registry)
 
     findings.sort(key=lambda f: (-f.priority, -f.ftype.rank, f.name))
     ctx.findings = findings
@@ -122,8 +119,6 @@ def _merge_same_location(findings: list[Finding]) -> list[Finding]:
         if len(group) == 1:
             merged.append(group[0])
             continue
-        # Keep the richest report as the base: strongest claim first, then the
-        # one that actually verified something.
         group.sort(key=lambda f: (f.ftype.rank, int(f.confidence),
                                   int(f.severity), len(f.description)),
                    reverse=True)
@@ -229,6 +224,80 @@ def _recap_severity(finding: Finding) -> None:
         finding.ftype = FindingType.POTENTIAL_VULN
 
 
+
+def tag_contributing_tools(finding: Finding, registry) -> list[str]:
+    """Record which external tools' output backs this finding.
+
+    lopata's own modules are deliberately excluded: a module cannot time out,
+    and its presence in `sources` is what marks a finding as corroborated by
+    something other than the tool in question.
+    """
+    if registry is None:
+        return finding.contributing_tools
+    tools: list[str] = []
+    for source in list(finding.sources) + [finding.module]:
+        key = registry.resolve(source)
+        if key and key not in tools:
+            tools.append(key)
+    finding.contributing_tools = tools
+    return tools
+
+
+def _coverage_note(degraded) -> str:
+    """e.g. "Evidence from dalfox, which timed out before completing this
+    target — treat as unverified."."""
+    names = ", ".join(s.tool_name for s in degraded)
+    verb = ("timed out" if any(s.status is ToolStatus.TIMED_OUT for s in degraded)
+            else "failed")
+    plural = "which" if len(degraded) == 1 else "which all"
+    return (f"Evidence from {names}, {plural} {verb} before completing this "
+            "target — treat as unverified.")
+
+
+def apply_tool_coverage(ctx, registry=None, logger=None) -> int:
+    """Cap findings left standing on a tool that never finished.
+
+    Runs after correlation, so corroboration has already been counted: a
+    finding two tools agree on keeps its confidence even if one of them timed
+    out, because the other one did finish and still saw it.
+    """
+    registry = registry if registry is not None else getattr(ctx, "tool_status", None)
+    if registry is None:
+        return 0
+
+    capped = 0
+    for finding in ctx.findings:
+        tools = finding.contributing_tools or tag_contributing_tools(finding, registry)
+        degraded = [registry.get(t) for t in tools if registry.is_degraded(t)]
+        if not degraded:
+            continue
+        healthy_tools = [t for t in tools if not registry.is_degraded(t)]
+        own_checks = [s for s in finding.sources if registry.resolve(s) is None]
+        if healthy_tools or own_checks or finding.verified_by:
+            continue
+
+        finding.incomplete_coverage = True
+        note = _coverage_note(degraded)
+        if note not in finding.description:
+            finding.description = (finding.description.rstrip()
+                                   + "\n\n" + note).strip()
+        if note not in finding.severity_reasons:
+            finding.severity_reasons.append(note)
+        if finding.confidence > Confidence.LOW:
+            finding.confidence = Confidence.LOW
+        _recap_severity(finding)
+        finding.business_impact = min(
+            finding.business_impact,
+            business_impact_for(finding.severity, Impact.INFORMATION))
+        capped += 1
+
+    if capped and logger:
+        logger.info("tool coverage: %d finding(s) capped to Low confidence — "
+                    "their only evidence came from a tool that did not finish",
+                    capped)
+    return capped
+
+
 def summarize(findings: list[Finding]) -> dict:
     by_type: dict[str, int] = defaultdict(int)
     by_sev: dict[str, int] = defaultdict(int)
@@ -248,6 +317,7 @@ def summarize(findings: list[Finding]) -> dict:
                           if f.severity >= Severity.MEDIUM
                           and f.confidence >= Confidence.MEDIUM),
         "quick_wins": sum(1 for f in findings if f.quick_win),
+        "incomplete_coverage": sum(1 for f in findings if f.incomplete_coverage),
         "by_type": dict(by_type),
         "by_severity": dict(by_sev),
         "by_confidence": dict(by_conf),

@@ -29,8 +29,6 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-# A 1x1 transparent GIF, returned for image beacons so the callback "works"
-# and nothing looks amiss in the rendering context.
 _GIF_1x1 = bytes.fromhex(
     "47494638396101000100800000000000ffffff21f90401000000002c000000"
     "00010001000002024401003b")

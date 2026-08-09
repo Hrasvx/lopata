@@ -20,8 +20,8 @@ classifiers = [
 ]
 
 dependencies = [
-    "requests>=2.28",
-    "httpx>=0.24",
+    "requests[socks]>=2.28",
+    "httpx[socks]>=0.24",
     "beautifulsoup4>=4.11",
     "rich>=13.0",
     "reportlab>=3.6",
@@ -30,6 +30,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dns = ["dnspython>=2.3"]
+dev = ["pytest>=7.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [project.scripts]
 lopata = "lopata.cli:main"

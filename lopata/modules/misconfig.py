@@ -197,8 +197,6 @@ def _directory_listing(ctx, baseline) -> None:
             sources=[MODULE_NAME],
         )
         apply(finding, SeverityFactors(
-            # Not merely informational: a listing reliably surfaces files that
-            # are deliberately unlinked, which is where the real damage is.
             impact=Impact.LIMITED,
             exploitability=Exploitability.EASY,
             auth=AuthRequirement.NONE,

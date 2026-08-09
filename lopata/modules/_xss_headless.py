@@ -51,9 +51,6 @@ def available() -> bool:
     return _AVAILABLE
 
 
-# --------------------------------------------------------------------------
-# Auth-state bridging (requests session <-> Playwright storage_state)
-# --------------------------------------------------------------------------
 
 def _samesite(cookie) -> str:
     rest = getattr(cookie, "_rest", None) or {}
@@ -76,8 +73,6 @@ def _to_pw_cookie(cookie, default_domain: str) -> dict | None:
         return None
     secure = bool(cookie.secure)
     same_site = _samesite(cookie)
-    # Browsers reject SameSite=None on a non-secure cookie; downgrade so the
-    # whole context does not get refused over one cookie.
     if same_site == "None" and not secure:
         same_site = "Lax"
     pw = {
@@ -140,9 +135,6 @@ def export_storage_state(state: dict, path: str) -> bool:
         return False
 
 
-# --------------------------------------------------------------------------
-# Execution verification
-# --------------------------------------------------------------------------
 
 def verify_execution(url: str, token: str, timeout: float = 8.0,
                      insecure: bool = False, storage_state: dict | None = None
@@ -172,8 +164,6 @@ def verify_execution(url: str, token: str, timeout: float = 8.0,
                     ignore_https_errors=insecure,
                     storage_state=storage_state or None)
             except Exception:
-                # A malformed cookie must not disable verification outright;
-                # fall back to an unauthenticated context.
                 context = browser.new_context(ignore_https_errors=insecure)
             page = context.new_page()
 

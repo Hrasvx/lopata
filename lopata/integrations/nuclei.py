@@ -69,7 +69,8 @@ def run(ctx, phase=None) -> None:
                 "-timeout", str(int(ctx.timeout) + 5),
                 "-rate-limit", str(int(ctx.config.get("nuclei_rate_limit", 150)))]
         proc = run_tool(argv, timeout=int(ctx.config.get("nuclei_timeout", 600)),
-                        logger=ctx.logger)
+                        logger=ctx.logger,
+                        ctx=ctx, tool="nuclei")
     phase and phase.step()
     if proc is None or not proc.stdout.strip():
         return
@@ -153,8 +154,6 @@ def _handle(ctx, obj: dict) -> bool:
         or ctx.target
     template_id = obj.get("template-id") or ""
 
-    # Pure detection templates are inventory: route them to the tech registry
-    # rather than manufacturing a finding.
     is_detection = (tags & _DETECT_TAGS
                     or template_id.endswith("-detect")
                     or name.lower().endswith("detection"))
@@ -170,9 +169,6 @@ def _handle(ctx, obj: dict) -> bool:
     impact, exploit = _SEV_SEED.get(sev, _SEV_SEED["unknown"])
     cvss = _cvss(info)
 
-    # A nuclei match is one real observation from one tool: Medium confidence,
-    # which the correlation pass will raise if lopata or another tool agrees,
-    # and which caps severity until then. Detection-only info stays Low.
     confidence = Confidence.MEDIUM if sev not in ("info", "unknown") else Confidence.LOW
 
     extracted = obj.get("extracted-results") or []

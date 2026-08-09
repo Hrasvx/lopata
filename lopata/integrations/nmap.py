@@ -46,17 +46,13 @@ def run(ctx, phase=None) -> None:
         argv += ["-F"]
     if ctx.config.get("nmap_vuln", True):
         argv += ["--script", str(ctx.config.get("nmap_scripts", "vuln")),
-                 # Individual NSE scripts must be able to give up, or one slow
-                 # http-* script against a live site consumes the whole budget.
                  "--script-timeout",
                  str(ctx.config.get("nmap_script_timeout", 60)) + "s"]
-    # Let nmap bail out on its own terms just before we would kill it: a
-    # host-timeout still prints the XML for everything found so far, whereas a
-    # killed process leaves us with nothing at all.
     argv += ["--host-timeout", f"{max(timeout - 30, 30)}s"]
     argv.append(host)
 
-    proc = run_tool(argv, timeout=timeout, logger=ctx.logger)
+    proc = run_tool(argv, timeout=timeout, logger=ctx.logger,
+    ctx=ctx, tool="nmap")
     phase and phase.step()
     if proc is None or not proc.stdout.strip():
         ctx.logger and ctx.logger.warning(
@@ -137,18 +133,13 @@ def _tech_from_service(ctx, service: Service) -> None:
         version=service.version.strip(),
         category=category,
         sources=[MODULE_NAME],
-        # Service banners are self-reported and trivially spoofed.
+        # Service banners are self-reproted and trivially spoofed.
         confidence=Confidence.LOW,
         evidence=f"nmap -sV on {service.endpoint}: {service.banner}",
     ))
 
 
-# --------------------------------------------------------------------------
-# NSE output interpretation
-# --------------------------------------------------------------------------
 
-# Phrases that mean "we checked and it is fine". Matching any of these is a
-# hard stop: the script result becomes a passed check, never a finding.
 _NEGATIVE = re.compile(
     r"\bNOT\s+VULNERABLE\b"
     r"|\bnot\s+vulnerable\b"
@@ -164,8 +155,6 @@ _NEGATIVE = re.compile(
     re.I,
 )
 
-# ...unless the script is saying the opposite. "not patched" must never be
-# read as a clean result just because it contains the word "patched".
 _NEGATIVE_OVERRIDE = re.compile(
     r"\bnot\s+patched\b|\bunpatched\b|\bstill\s+vulnerable\b", re.I)
 
@@ -197,8 +186,6 @@ def classify(script_id: str, output: str) -> str:
     if _NEGATIVE.search(text) and not negated:
         return "passed"
     if negated:
-        # "not patched", "still vulnerable" — the script is asserting the
-        # opposite of a clean result even without a formal State: line.
         return "likely"
     if _ERRORISH.search(text) and not _STATE_VULNERABLE.search(text):
         return "error"
@@ -240,8 +227,6 @@ def _nse_vuln_finding(ctx, location, service, sid, output, exploitable) -> None:
     cves = sorted(set(m.upper() for m in _CVE_ANY.findall(output)))
     title = _script_title(output) or sid
 
-    # "State: VULNERABLE (Exploitable)" means the script drove the condition,
-    # not that it matched a version string — that is worth real confidence.
     if exploitable and "exploitable" in qualifier:
         confidence = Confidence.HIGH
         ftype = FindingType.CONFIRMED_VULN
@@ -395,8 +380,6 @@ def _version_match_finding(ctx, location, service, sid, output) -> None:
         auth=AuthRequirement.NONE,
         exposure=(Exposure.INTERNAL
                   if service is not None and service.internal else Exposure.PUBLIC),
-        # Banner matching only — this is exactly the case that must never
-        # produce a High or Medium severity on its own.
         confidence=Confidence.LOW,
         notes=["derived from a version banner alone; no behaviour was tested"],
     ))

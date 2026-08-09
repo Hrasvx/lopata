@@ -88,7 +88,8 @@ def _scan(ctx, info, target, timeout):
             argv += ["-d", "&".join(f"{k}={v}" for k, v in target["data"].items())]
     if not ctx.config.get("verify_tls", True):
         argv.append("--skip-verify")
-    proc = run_tool(argv, timeout=timeout, logger=ctx.logger)
+    proc = run_tool(argv, timeout=timeout, logger=ctx.logger,
+    ctx=ctx, tool="dalfox")
     if proc is None:
         return [], ""
     out = (proc.stdout or "").strip()

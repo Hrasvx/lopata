@@ -65,9 +65,6 @@ def run(ctx, phase=None) -> None:
                              and headless.available())
     ctx._xss_storage_state = None
     if ctx._xss_use_headless:
-        # Bridge the scanner's authenticated cookies (and any imported
-        # storage_state.json) into the browser context so DOM/stored-XSS
-        # verification runs as the logged-in user, not anonymously.
         ctx._xss_storage_state = headless.build_storage_state(
             ctx.session.cookies, ctx.target,
             ctx.config.get("xss_storage_state"))
@@ -110,9 +107,6 @@ def run(ctx, phase=None) -> None:
     phase and phase.done()
 
 
-# --------------------------------------------------------------------------
-# Target enumeration
-# --------------------------------------------------------------------------
 
 def _param_targets(ctx) -> list[tuple]:
     """(method, url, param, data) for every reflected-parameter candidate."""
@@ -151,9 +145,6 @@ def _param_targets(ctx) -> list[tuple]:
     return targets
 
 
-# --------------------------------------------------------------------------
-# Injection primitives
-# --------------------------------------------------------------------------
 
 def _inject_query(url: str, param: str, value: str) -> str:
     parsed = urlparse(url)
@@ -183,9 +174,6 @@ def _looks_blocked(clean, resp) -> bool:
                                   for s in _WAF_SIGNS))
 
 
-# --------------------------------------------------------------------------
-# Reflected — parameters
-# --------------------------------------------------------------------------
 
 async def _test_reflected_param(ctx, fetcher, url, param, method, data) -> Finding | None:
     canary, token = _marker()
@@ -201,9 +189,6 @@ async def _test_reflected_param(ctx, fetcher, url, param, method, data) -> Findi
     if canary not in body:
         return None
 
-    # The canary is random, so its presence proves *our* input reflected — but
-    # guard against a page that happens to echo it back even without injection
-    # (a generic "you searched for …" 404 baseline).
     baseline = getattr(getattr(ctx, "baseline", None), "root", None)
     if baseline is not None and canary in (baseline.body or ""):
         return None
@@ -219,8 +204,6 @@ async def _test_reflected_param(ctx, fetcher, url, param, method, data) -> Findi
     if (result["exploitable"] and not result["interaction"]
             and method == "GET" and getattr(ctx, "_xss_use_headless", False)):
         payload_url = _inject_query(url, param, result["payload"])
-        # Playwright's sync API blocks; run it off the event loop so it does not
-        # stall the other reflected-parameter probes running concurrently.
         verified = await asyncio.to_thread(
             headless.verify_execution,
             payload_url, token, min(ctx.timeout + 3, 12),
@@ -345,9 +328,6 @@ def _build_reflected(ctx, method, url, param, result, verified, waf,
     return finding
 
 
-# --------------------------------------------------------------------------
-# Reflected — headers
-# --------------------------------------------------------------------------
 
 def _test_reflected_headers(ctx) -> None:
     urls = [ctx.target.rstrip("/") + "/"]
@@ -384,8 +364,6 @@ def _test_reflected_headers(ctx) -> None:
 
 
 def _header_finding(ctx, url, header, result) -> Finding:
-    # Referer is attacker-influenceable (link from their page); the forwarded
-    # headers usually require a proxy position, so they are rated lower.
     if header.lower() == "referer":
         exploit, note = (Exploitability.MODERATE,
                          "the Referer header is set by the browser when a victim "
@@ -434,9 +412,6 @@ def _header_finding(ctx, url, header, result) -> Finding:
     return finding
 
 
-# --------------------------------------------------------------------------
-# Reflected — JSON body
-# --------------------------------------------------------------------------
 
 def _test_json_params(ctx) -> None:
     api_urls = [u for u in ctx.discovered_urls
@@ -454,9 +429,6 @@ def _test_json_params(ctx) -> None:
         body = resp.text or ""
         if canary not in body:
             continue
-        # A payload reflected into a JSON response is only XSS if the response is
-        # served as HTML (or sniffable as such); flag JSON-context reflection as
-        # a lower-confidence lead otherwise.
         html_context = "html" in ctype or "text/plain" in ctype
         result = analyze(body, canary, token)
         if result is None:
@@ -511,9 +483,6 @@ def _json_finding(ctx, url, result, html_context) -> Finding:
     return finding
 
 
-# --------------------------------------------------------------------------
-# Stored
-# --------------------------------------------------------------------------
 
 def _test_stored(ctx) -> None:
     canary, token = _marker()
@@ -632,9 +601,6 @@ def _stored_finding(ctx, page, result, verified) -> Finding:
     return finding
 
 
-# --------------------------------------------------------------------------
-# DOM-based (headless only)
-# --------------------------------------------------------------------------
 
 def _test_dom(ctx) -> None:
     max_urls = int(ctx.config.get("xss_max_dom_urls", 15))
@@ -704,15 +670,8 @@ def _dom_finding(ctx, url, token) -> Finding:
     return finding
 
 
-# --------------------------------------------------------------------------
-# Blind (out-of-band)
-# --------------------------------------------------------------------------
 
 def _test_blind(ctx) -> None:
-    # Prefer the built-in listener when it is running; otherwise fall back to a
-    # user-supplied external callback (e.g. interact.sh). Either way, each
-    # injection point gets its own token so a hit pinpoints exactly where it
-    # fired — and, with the listener, is correlated into a CONFIRMED finding.
     listener = getattr(ctx, "blind_listener", None)
     callback = listener.base_url if listener is not None \
         else ctx.config.get("xss_blind_callback")
@@ -727,9 +686,6 @@ def _test_blind(ctx) -> None:
         beacon = urljoin(callback + "/", token)
         payload = (f'"><script src="{beacon}"></script>'
                    f'<img src="{beacon}/i.png">')
-        # Register before planting: a synchronously-rendered sink can fire the
-        # callback during the request itself, so the token must already be known
-        # when the hit lands. An unused token (if the request fails) is harmless.
         if listener is not None:
             listener.register_token(token, {**context, "where": where})
         try:

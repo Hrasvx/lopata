@@ -27,10 +27,6 @@ GROUP_OTHER = "Other Services"
 GROUP_ORDER = (GROUP_DB, GROUP_ADMIN, GROUP_DEV, GROUP_CACHE, GROUP_DIR,
                GROUP_FILE, GROUP_MAIL, GROUP_WEB, GROUP_NET, GROUP_OTHER)
 
-# Groups where public reachability is worth reporting as a Security Exposure
-# even when the service is one people routinely expose. Public SSH is normal
-# and is still attack surface the owner should have decided on deliberately;
-# a public web server is not.
 SENSITIVE_GROUPS = (GROUP_DB, GROUP_ADMIN, GROUP_DEV, GROUP_CACHE, GROUP_DIR)
 
 
@@ -49,7 +45,7 @@ class ServiceProfile:
     exposure_impact: Impact = Impact.INFORMATION
     exploitability: Exploitability = Exploitability.MODERATE
     auth: AuthRequirement = AuthRequirement.NONE
-    # Ports where cleartext credentials cross the wire by default.
+    # Ports where cleartext credentails cross the wire by default.
     cleartext: bool = False
 
 
@@ -85,11 +81,6 @@ def _db(name: str, port: int, bind_hint: str, extra_steps: list[str]) -> Service
             f"From an unrelated host run `nc -vz <target> {port}` — it must not "
             f"connect. From the application host, confirm the app still works."
         ),
-        # Reachability, not access: the engine still requires credentials, so
-        # exposure alone is a serious *precondition* rather than a compromise.
-        # Rating this SERIOUS would make every open database port a High, which
-        # is exactly the reflex this scanner is meant to avoid. It escalates
-        # only if something else — weak auth, a confirmed CVE — corroborates it.
         exposure_impact=Impact.LIMITED,
         exploitability=Exploitability.EASY,
         auth=AuthRequirement.NONE,
@@ -612,7 +603,5 @@ def is_internal_address(host: str) -> bool:
     try:
         addr = ipaddress.ip_address(host)
     except ValueError:
-        # A hostname rather than a literal — assume it resolves publicly,
-        # since that is the case that matters for exposure reporting.
         return False
     return not addr.is_global

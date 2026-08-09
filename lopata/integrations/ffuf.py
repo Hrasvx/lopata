@@ -25,8 +25,6 @@ MODULE_NAME = "ffuf"
 CATEGORY = "Attack Surface"
 PHASE = "recon"
 
-# Small, high-signal list used when no wordlist is configured or installed.
-# Deliberately compact — this is targeted discovery, not brute force.
 _BUILTIN_WORDS = (
     "admin", "administrator", "login", "wp-admin", "wp-login.php", "dashboard",
     "portal", "console", "manager", "phpmyadmin", "adminer.php", "cpanel",
@@ -123,7 +121,8 @@ def _run_ffuf(ctx, info, wl_path, timeout) -> list[str]:
                 "-of", "json", "-o", out_path]
         if not ctx.config.get("verify_tls", True):
             argv.append("-k")
-        run_tool(argv, timeout=timeout, logger=ctx.logger)
+        run_tool(argv, timeout=timeout, logger=ctx.logger,
+        ctx=ctx, tool="ffuf")
         raw = read_output()
     if not raw:
         return []
@@ -154,7 +153,8 @@ def _run_gobuster(ctx, info, wl_path, timeout) -> list[str]:
             "-s", "200,204,301,302,307,401,403", "-b", ""]
     if not ctx.config.get("verify_tls", True):
         argv.append("-k")
-    proc = run_tool(argv, timeout=timeout, logger=ctx.logger)
+    proc = run_tool(argv, timeout=timeout, logger=ctx.logger,
+    ctx=ctx, tool="ffuf")
     if proc is None or not proc.stdout.strip():
         return []
     ctx.add_raw_output("gobuster", proc.stdout)

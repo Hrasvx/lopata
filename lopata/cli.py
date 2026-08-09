@@ -13,10 +13,14 @@ from .core import baseline as baseline_mod
 from .core import checkpoint as ckpt
 from .core import correlate as correlate_mod
 from .core import scoring
-from .core.config import load_config
-from .core.http import build_session, normalize_target, parse_auth_args
+from .core.config import load_config, tool_base_timeout
+from .core.http import (ANON_USER_AGENT, build_session, normalize_target,
+                        parse_auth_args)
 from .core.logging_setup import get_logger
 from .core.models import Confidence, ScanContext, Severity
+from .core.retry import RetryPolicy, RetrySupervisor
+from .core.timing import MODULE, TOOL, ScanEstimator, TimingHistory
+from .core.tool_status import ToolStatus
 from .core.ui import LopataUI
 from .integrations import INTEGRATIONS, phase_of
 from .modules import MODULES
@@ -81,6 +85,16 @@ def build_parser() -> argparse.ArgumentParser:
                         f"Choices: {', '.join(INTEGRATIONS)}. Default: all available.")
     p.add_argument("--no-tools", action="store_true",
                    help="Skip all external tools (web-layer modules only).")
+    p.add_argument("--no-retry", action="store_true",
+                   help="Do not retry tools that time out or fail — one "
+                        "attempt each, the pre-1.3 behaviour. Findings left "
+                        "resting on a tool that did not finish are still "
+                        "capped and flagged.")
+    p.add_argument("--max-tool-timeout", type=float, default=None,
+                   metavar="SECONDS",
+                   help="Ceiling on how large a retried tool's timeout may "
+                        "grow (base_timeout * multiplier^attempts is clamped "
+                        "to this).")
     p.add_argument("--config", default=None, help="YAML scan-profile path.")
     p.add_argument("--auth-header", action="append", metavar="'Name: value'",
                    help="Add a request header for authenticated scans (repeatable).")
@@ -95,6 +109,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--insecure", action="store_true",
                    help="Do not verify TLS certs while crawling "
                         "(the TLS module still reports cert problems).")
+    p.add_argument("--proxy", default=None, metavar="URL",
+                   help="Route lopata's own HTTP(S) traffic through a proxy, "
+                        "e.g. http://127.0.0.1:8080 (Burp/ZAP) or "
+                        "socks5h://127.0.0.1:9050 (Tor). Omit for a direct "
+                        "connection. External tools are unaffected.")
+    p.add_argument("--user-agent", default=None, metavar="STRING",
+                   help="Override the User-Agent sent by both HTTP layers "
+                        "(default self-identifies as lopata).")
+    p.add_argument("--anonymous", action="store_true",
+                   help="Do not self-identify: send a generic browser "
+                        "User-Agent. Requires --proxy (or proxy: in config), "
+                        "since without one your real IP still leaks.")
     p.add_argument("--resume", action="store_true",
                    help="Resume from a checkpoint if one exists for this target.")
     p.add_argument("--checkpoint", default=None,
@@ -154,11 +180,17 @@ def _select_tools(args, cfg) -> list[str]:
 
 
 
-def _run_tool_phase(ctx, ui, logger, names, completed, cp_path) -> None:
+def _run_tool_phase(ctx, ui, logger, names, completed, cp_path,
+                    label: str = "recon") -> None:
     """Run a set of external-tool integrations, sharing the checkpoint and UI
     bookkeeping. Used for both the recon phase (before the crawler) and the
     post-discovery phase (after the web modules), which differ only in when
-    they run and what surface they consume."""
+    they run and what surface they consume.
+
+    Every integration leaves a ToolRunStatus behind, whether it ran, was
+    skipped, or blew up — a tool that contributes nothing must be visible as a
+    gap rather than as silence.
+    """
     for name in names:
         key = f"tool:{name}"
         if key in completed:
@@ -167,16 +199,25 @@ def _run_tool_phase(ctx, ui, logger, names, completed, cp_path) -> None:
         module = INTEGRATIONS[name]
         info = module.available(ctx)
         if not info.available:
-            ui.note(f"recon: {name} — skipped ({info.note or 'not available'})")
+            ui.note(f"{label}: {name} — skipped ({info.note or 'not available'})")
+            ctx.tool_status.mark_unrun(name, info.note or "not available")
             completed.append(key)
             ckpt.save(ctx, cp_path, completed)
             ui.advance_overall()
             continue
-        ph = ui.phase(f"recon: {name}", total=1)
+        ph = ui.phase(f"{label}: {name}", total=1)
+        ui.begin_unit(name)
         try:
             module.run(ctx, ph)
         except Exception as exc:
             logger.warning("integration '%s' failed: %s", name, exc)
+            ctx.tool_status.mark(name, ToolStatus.FAILED,
+                                 stderr_tail=str(exc),
+                                 note=f"integration raised {exc.__class__.__name__}")
+        # an integration that invoked nothing still owes the run a status
+        ctx.tool_status.mark_unrun(name, "ran but had nothing to scan here")
+        status = ctx.tool_status.get(name)
+        ui.end_unit(name, record=bool(status and status.completed))
         ph.done()
         completed.append(key)
         ckpt.save(ctx, cp_path, completed)
@@ -243,6 +284,19 @@ def run_scan(args) -> int:
         cfg["max_pages"] = args.max_pages
     if args.insecure:
         cfg["verify_tls"] = False
+    if args.proxy:
+        cfg["proxy"] = args.proxy
+    if args.user_agent:
+        cfg["user_agent"] = args.user_agent
+    if args.anonymous:
+        if not cfg.get("proxy"):
+            print("--anonymous requires --proxy (or proxy: in config): without "
+                  "a proxy your real IP still reaches the target.",
+                  file=sys.stderr)
+            return 2
+        # An explicit --user-agent wins; otherwise wera a generic browser string.
+        if not cfg.get("user_agent"):
+            cfg["user_agent"] = ANON_USER_AGENT
     if args.modules:
         cfg["modules"] = args.modules
     if args.blind_xss_listen:
@@ -258,7 +312,8 @@ def run_scan(args) -> int:
         print(f"invalid target: {exc}", file=sys.stderr)
         return 2
 
-    ui = LopataUI(enabled=not args.no_ui)
+    estimator = ScanEstimator(history=TimingHistory())
+    ui = LopataUI(enabled=not args.no_ui, estimator=estimator)
     ui.banner(target, __version__)
     print(f"! {DISCLAIMER}\n")
 
@@ -280,7 +335,8 @@ def run_scan(args) -> int:
 
     session = build_session(
         timeout=cfg["timeout"], verify_tls=cfg["verify_tls"],
-        auth_headers=auth_headers or None, auth_cookies=auth_cookies or None)
+        auth_headers=auth_headers or None, auth_cookies=auth_cookies or None,
+        proxy=cfg.get("proxy"), user_agent=cfg.get("user_agent"))
 
     ctx = ScanContext(
         target=target, session=session, config=cfg,
@@ -321,10 +377,40 @@ def run_scan(args) -> int:
 
     cp_path = ckpt.checkpoint_path(target, args.checkpoint)
     completed: list[str] = []
+    resumed_attempts: dict = {}
     if args.resume:
         completed = ckpt.load(ctx, cp_path)
+        resumed_attempts = ckpt.resumed_attempts(cp_path)
         if completed:
             logger.info("resuming; %d phase(s) already done", len(completed))
+        if resumed_attempts:
+            logger.info("resuming mid-retry; attempts already spent: %s",
+                        ", ".join(f"{t}={n}" for t, n in
+                                  sorted(resumed_attempts.items())))
+
+    # a tool switched off in the profile must not count against completeness
+    cfg_tools = cfg.get("tools", {}) or {}
+    expected_tools = [t for t in tools if cfg_tools.get(t, True)]
+    ctx.tool_status.expect(expected_tools)
+
+    # retry supervision wraps every external invocation
+    policy = RetryPolicy.from_config(cfg, no_retry=args.no_retry,
+                                     max_tool_timeout=args.max_tool_timeout)
+    ctx.retry_supervisor = RetrySupervisor(
+        policy, logger=logger, ui=ui, resumed_attempts=resumed_attempts)
+    if policy.enabled:
+        logger.info("retry: up to %d attempt(s) per tool, timeout x%.1f each",
+                    policy.max_attempts, policy.timeout_multiplier)
+
+    estimator.plan(
+        [(t, TOOL, tool_base_timeout(cfg, t)) for t in recon_tools]
+        + [("baseline", MODULE, 15.0)]
+        + [(m, MODULE, 30.0) for m in web_modules]
+        + [(t, TOOL, tool_base_timeout(cfg, t)) for t in post_tools]
+        + [("correlate", MODULE, 5.0)])
+    # work finished before an interruption is dropped from the estimate
+    for done_key in completed:
+        estimator.skip(done_key.split(":", 1)[-1])
 
     # tools + baseline + web modules + correlation
     phase_count = len(tools) + len(web_modules) + 2
@@ -340,7 +426,9 @@ def run_scan(args) -> int:
 
     ui.section("baseline & web-layer analysis")
     bph = ui.phase("learning not-found baseline", total=1)
+    ui.begin_unit("baseline")
     ctx.baseline = baseline_mod.build_baseline(ctx)
+    ui.end_unit("baseline")
     bph.done()
     ui.advance_overall()
     for name in web_modules:
@@ -350,6 +438,7 @@ def run_scan(args) -> int:
             continue
         module, _ = MODULES[name]
         ph = ui.phase(f"module: {name}", total=1)
+        ui.begin_unit(name)
         try:
             module.run(ctx, ph)
         except Exception as exc:
@@ -357,23 +446,18 @@ def run_scan(args) -> int:
             if args.verbose:
                 import traceback
                 logger.debug(traceback.format_exc())
+        ui.end_unit(name)
         ph.done()
         completed.append(key)
         ckpt.save(ctx, cp_path, completed)
         ui.advance_overall()
 
-    # Post-discovery tools consume the crawled surface (URLs, parameters, forms,
-    # fetched assets), so they run only now that the web modules are done — but
-    # still before correlation, so their output is merged and cross-corroborated
-    # with lopata's own findings like any other source.
     if post_tools:
         ui.section("verification — surface-aware tools")
-    _run_tool_phase(ctx, ui, logger, post_tools, completed, cp_path)
+    _run_tool_phase(ctx, ui, logger, post_tools, completed, cp_path,
+                    label="verify")
 
-    # Correlation runs across every module's output at once: it merges
-    # duplicate observations, raises confidence where independent sources
-    # agree, lowers it where a lone tool is the only voice, and re-derives
-    # severity afterwards because confidence caps severity.
+    ui.begin_unit("correlate")
     if not args.no_correlate:
         cph = ui.phase("correlating findings", total=1)
         raw_count = len(ctx.findings)
@@ -385,11 +469,18 @@ def run_scan(args) -> int:
         if raw_count != len(ctx.findings):
             ui.note(f"correlation: {raw_count} observation(s) -> "
                     f"{len(ctx.findings)} finding(s)")
+
+    # coverage capping runs even with --no-correlate
+    try:
+        capped = correlate_mod.apply_tool_coverage(ctx, logger=logger)
+        if capped:
+            ui.note(f"{capped} finding(s) capped to Low confidence — their "
+                    "only evidence came from a tool that did not finish")
+    except Exception as exc:
+        logger.warning("tool-coverage pass failed: %s", exc)
+    ui.end_unit("correlate")
     ui.advance_overall()
 
-    # Fold any out-of-band blind-XSS callbacks into the report. This runs after
-    # correlation so a confirmed hit stands as its own CONFIRMED finding, and
-    # honours xss_blind_wait to give late callbacks a grace period first.
     if blind_listener is not None:
         try:
             wait = float(cfg.get("xss_blind_wait", 0) or 0)
@@ -410,14 +501,18 @@ def run_scan(args) -> int:
         finally:
             blind_listener.stop()
 
-    # Tear down anything a tool spawned for the scan (e.g. a ZAP daemon we
-    # started). Their results are already merged into ctx by this point.
+    # tear down anything a tool spawned (e.g. a ZAP daemon we started)
     ctx.run_cleanups()
 
     try:
         scoring.compute(ctx)
     except Exception as exc:
         logger.warning("scoring failed: %s", exc)
+
+    banner = (ctx.scores.get("scan_completeness") or {}).get("banner", "")
+    if banner:
+        logger.warning("%s", banner)
+        ui.note(banner, style="yellow")
 
     dropped = _apply_filters(ctx, args)
     if dropped:
@@ -426,6 +521,8 @@ def run_scan(args) -> int:
     duration = time.perf_counter() - t0
     finished = datetime.datetime.now(datetime.timezone.utc)
     ui.stop()
+    # Feed this run's real durations back for the next scan's ETA.
+    estimator.save_history()
 
 
     export_fmt = _resolve_export(args)

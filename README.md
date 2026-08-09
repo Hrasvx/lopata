@@ -26,6 +26,30 @@ Passed checks are kept in their own section "not vulnerable".
 
 Severity is worked out from five things: impact, how exploitable it is, whether authentication is needed, whether it's reachable from the internet, and confidence + a public CVSS score if one exists.
 
+### When a tool doesn't finish
+
+A scanner that quietly drops a timed-out tool's results can't tell you the difference between "we looked and it was clean" and "we never finished looking". Lopata tracks how every external tool ended — `completed`, `timed_out`, `failed`, or `skipped_missing` — and uses it:
+
+- A finding whose **only** evidence came from a tool that timed out or failed is capped at **Low** confidence (which caps its severity through the normal rule), flagged `incomplete_coverage`, and carries a line saying so: *"Evidence from dalfox, which timed out before completing this target — treat as unverified."*
+- A finding **two** sources agree on keeps its confidence even if one of them timed out — the other one finished and still saw it.
+- If any tool didn't finish, the report opens with a banner: *"This report may be incomplete — 11 of 13 tools finished (list: dalfox: timed out, zap: skipped missing)."* This is never folded into the score; an unfinished scan is a less trustworthy report, not a worse security posture.
+- `--json` carries the same thing as a top-level `scan_completeness` object, plus per-tool `tool_runs`, so CI can gate on coverage instead of guessing.
+
+### Retrying tools that run out of time
+
+Before accepting that gap, lopata gives a timed-out tool another go with a bigger budget — usually the only thing wrong was the timeout:
+
+```yaml
+retry:
+  max_attempts: 2          # total attempts, including the first
+  timeout_multiplier: 2.0  # attempt N runs at base_timeout * multiplier^(N-1)
+  retry_on: [timed_out, failed]
+  backoff_seconds: 2.0
+  max_tool_timeout: null   # e.g. 1800 to never let an attempt exceed 30 min
+```
+
+Every attempt is logged: `dalfox: attempt 1/2 timed out after 1800s, retrying with 3600s timeout`. A missing binary is never retried. Retries all finish inside the tool phase, before correlation runs. `--no-retry` restores single-attempt behaviour and `--max-tool-timeout SECONDS` caps how far a timeout may grow. Interrupting a scan mid-retry and resuming it with `--resume` picks up the remaining attempts rather than handing every tool a fresh budget.
+
 ---
 
 ## Installing on Alpine Linux
@@ -101,9 +125,36 @@ lopata example.com --auth-cookie "session=abc123" \
                    --auth-header "Authorization: Bearer TOKEN"   # authenticated
 lopata example.com --resume                          # continue an interrupted scan
 lopata example.com --logfile scan.log -v             # verbose logging to a file
+lopata example.com --no-retry                        # one attempt per tool
+lopata example.com --max-tool-timeout 900            # cap retried tool timeouts
 ```
 
 `--export {pdf,html}` picks the report format (default is `pdf`). Using `-o` with a `.html` file name also switches the format, unless `--export` is set explicitly. `--json` works independently of both.
+
+### Watching a scan
+
+The console keeps everything that changes in one live block that's redrawn in place, so a noisy target can't bury the progress display:
+
+```
+╭─ findings ───────────────────────────────────────────────────────────╮
+│ CRIT: 1  HIGH: 2  MED: 4  LOW: 6  INFO: 0  TOTAL: 13                 │
+╰──────────────────────────────────────────────────────────────────────╯
+⠋ verify: nuclei ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 12/19 0:04:12
+  [12/19] running nuclei ...  elapsed 2m14s / est. 3m40s  |  scan ETA: ~9m remaining
+╭─ latest ─────────────────────────────────────────────────────────────╮
+│  CRIT  VULN      SQL injection  (confirmed)  /item?id=3 [param: id]  │
+│  HIGH  POSSIBLE  Reflected XSS  /search?q=1 [param: q]               │
+│  MED   MISCONFIG Missing Content-Security-Policy  /                  │
+│   … 10 earlier finding(s) — all of them are in the report            │
+╰──────────────────────────────────────────────────────────────────────╯
+                                                       lopata · hrasvx
+```
+
+Findings are a rolling window of the most recent few, not a scrolling log — the counters, the final summary and the report hold the full set. Finished phases drop out of the progress block instead of stacking up. Only section rules and notes reach the scrollback.
+
+With `--no-ui`, or when output is piped or redirected, lopata falls back to plain lines — one per finding — which is what CI and `tee` want.
+
+Per-tool estimates come from a rolling average of that tool's last few runs, kept in `~/.cache/lopata/timings.json`. A tool with no history yet falls back to its configured timeout and is labelled `(estimated, no history yet)` rather than pretending to be precise. If a tool goes into a retry with a longer timeout, the ETA widens to match. `--resume` counts phases already done, `--no-tools` shows module timing only, and the live display is console-only — `--logfile` still gets plain, structured lines.
 
 ### Filtering the report
 
@@ -138,6 +189,15 @@ lopata/
     ├── modules/         # crawler, fingerprinting, headers, cookies, xss, sqli, etc.
     └── report/          # pdf.py  html.py  json_out.py  sarif_out.py
 ```
+
+## Running the tests
+
+```sh
+.venv/bin/pip install -e ".[dev]"
+.venv/bin/python -m pytest
+```
+
+Covers tool-status tracking and confidence capping, the retry supervisor, every integration's skip path, and the ETA estimator.
 
 ## Writing a plugin
 

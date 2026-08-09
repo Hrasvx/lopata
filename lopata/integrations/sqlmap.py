@@ -106,7 +106,8 @@ def _run_one(ctx, info, target, timeout) -> None:
         data.setdefault(target["param"], "1")
         argv += ["--method", "POST", "--data",
                  "&".join(f"{k}={v}" for k, v in data.items())]
-    proc = run_tool(argv, timeout=timeout, logger=ctx.logger)
+    proc = run_tool(argv, timeout=timeout, logger=ctx.logger,
+    ctx=ctx, tool="sqlmap")
     if proc is None:
         return
     out = (proc.stdout or "") + "\n" + (proc.stderr or "")

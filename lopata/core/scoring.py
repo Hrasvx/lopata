@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from .models import (AREA_CONFIG, AREA_HTTP, AREA_PATCH, AREA_SURFACE, AREA_TLS,
                      AREA_WEBAPP, SCORE_AREAS, Confidence, Severity)
+from .tool_status import ToolCoverage
+from .tool_status import coverage as tool_coverage
 
 # How much each area matters to the headline score.
 AREA_WEIGHTS = {
@@ -40,7 +42,7 @@ _SEVERITY_COST = {
     Severity.INFO: 0.0,
 }
 
-# A finding we are unsure about should not wreck the score.
+# A finding we are unusre about should not wreck the score.
 _CONFIDENCE_WEIGHT = {
     Confidence.CONFIRMED: 1.0,
     Confidence.HIGH: 0.9,
@@ -74,10 +76,6 @@ def _band(score: float) -> str:
     return "Poor"
 
 
-# A weighted average dilutes a single catastrophic finding across six
-# categories, which is how a host with a publicly readable .env ends up with a
-# respectable-looking grade. These ceilings stop that: the headline number can
-# never be better than the worst thing actually found.
 _CEILINGS = (
     (Severity.CRITICAL, Confidence.HIGH, 40.0,
      "a Critical finding was confirmed, which caps the overall score "
@@ -118,8 +116,6 @@ def compute(ctx) -> dict:
         # An area with findings has plainly been assessed.
         assessed.add(area)
 
-    # Clean results earn a little credit back, so a hardened target can reach
-    # the top of the band rather than merely avoiding penalties.
     credit: dict[str, float] = {area: 0.0 for area in SCORE_AREAS}
     for check in ctx.passed_checks:
         area = getattr(check, "score_area", "") or AREA_PATCH
@@ -162,9 +158,24 @@ def compute(ctx) -> dict:
         "weights": {a: AREA_WEIGHTS[a] for a in SCORE_AREAS},
         "assessed": sorted(assessed),
         "ceiling_reason": gate,
+        "scan_completeness": completeness(ctx),
     }
     ctx.scores = result
     return result
+
+
+def completeness(ctx) -> dict:
+    """How much of the intended tool coverage actually happened.
+
+    Deliberately *not* folded into the score. A half-finished scan is not a
+    better or worse security posture — it is a less trustworthy report, and
+    that is a separate thing to tell the reader, so it is surfaced as its own
+    caveat in the executive summary and as `scan_completeness` in the JSON.
+    """
+    registry = getattr(ctx, "tool_status", None)
+    if registry is None:
+        return ToolCoverage().as_dict()
+    return tool_coverage(registry).as_dict()
 
 
 def weakest_areas(scores: dict, limit: int = 3) -> list[tuple[str, dict]]:

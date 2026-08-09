@@ -59,7 +59,8 @@ def _run_one(ctx, info, url, timeout) -> list[str]:
                 "-t", str(min(ctx.threads, 10))]
         if not ctx.config.get("verify_tls", True):
             argv.append("--disable-redirects")  # harmless if unsupported
-        run_tool(argv, timeout=timeout, logger=ctx.logger)
+        run_tool(argv, timeout=timeout, logger=ctx.logger,
+        ctx=ctx, tool="arjun")
         raw = read_output()
     if not raw:
         return []

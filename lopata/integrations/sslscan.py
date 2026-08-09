@@ -53,8 +53,8 @@ def run(ctx, phase=None) -> None:
         ctx.tools["sslscan"] = ToolInfo(
             name="sslscan", available=False,
             note="skipped: target is not HTTPS")
-        # The "no TLS at all" finding lives in the headers module instead:
-        # it needs no external tool, so it must not be skipped with --no-tools.
+        from .base import mark_skipped
+        mark_skipped(ctx, "sslscan", "target is not HTTPS")
         return
     if not info.available:
         return
@@ -70,14 +70,12 @@ def run(ctx, phase=None) -> None:
     phase and phase.done()
 
 
-# --------------------------------------------------------------------------
-# sslyze
-# --------------------------------------------------------------------------
 
 def _run_sslyze(ctx, info, endpoint) -> None:
     argv = [info.path, "--json_out=-", "--quiet", endpoint]
     proc = run_tool(argv, timeout=int(ctx.config.get("ssl_timeout", 180)),
-                    logger=ctx.logger)
+                    logger=ctx.logger,
+                    ctx=ctx, tool="sslscan")
     if proc is None or not proc.stdout.strip():
         return
     ctx.add_raw_output("sslyze", proc.stdout)
@@ -385,9 +383,6 @@ def _sslyze_known_flaws(ctx, endpoint, scan) -> None:
         ctx.add_finding(finding)
 
 
-# --------------------------------------------------------------------------
-# testssl.sh
-# --------------------------------------------------------------------------
 
 _TESTSSL_SEVERITY = {
     "CRITICAL": (Impact.SERIOUS, Exploitability.EASY),
@@ -399,14 +394,12 @@ _TESTSSL_SEVERITY = {
 
 
 def _run_testssl(ctx, info, endpoint) -> None:
-    # testssl.sh does not honour "-" as "write JSON to stdout": it takes the
-    # value as a filename, drops "-.json" in the working directory, and leaves
-    # stdout as human-readable text. Give it a private directory instead.
     with temp_output(".json") as (json_path, read_output):
         argv = [info.path, "--jsonfile", json_path, "--quiet", "--color", "0",
                 endpoint]
         proc = run_tool(argv, timeout=int(ctx.config.get("ssl_timeout", 300)),
-                        logger=ctx.logger)
+                        logger=ctx.logger,
+                        ctx=ctx, tool="sslscan")
         if proc is not None and proc.stdout:
             ctx.add_raw_output("testssl.sh", proc.stdout)
         raw = read_output()
@@ -432,8 +425,6 @@ def _testssl_items(ctx, endpoint, items) -> None:
         finding_text = str(item.get("finding", "")).strip()
 
         if level in ("OK", "INFO"):
-            # testssl reports successful checks too — keep them as evidence
-            # that the control was tested rather than discarding them.
             if level == "OK" and finding_text:
                 ctx.add_passed(PassedCheck(
                     name=f"{ident}: OK",

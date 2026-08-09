@@ -93,9 +93,6 @@ CHECKS = [
         ["https://hstspreload.org/"],
         https_only=True,
     ),
-    # X-Frame-Options is deliberately absent here: the clickjacking module
-    # owns it, because the correct check is "XFO *or* CSP frame-ancestors",
-    # and reporting it from two modules would fake independent corroboration.
     _Check(
         "x-content-type-options", "X-Content-Type-Options",
         Impact.INFORMATION, Exploitability.MODERATE,
@@ -310,8 +307,6 @@ def _missing(ctx, check: _Check, url: str) -> None:
     apply(finding, SeverityFactors(
         impact=check.impact, exploitability=check.exploit,
         auth=AuthRequirement.NONE, exposure=Exposure.PUBLIC,
-        # The header's absence is directly observed; what is uncertain is the
-        # consequence, and that is reflected in the impact rating instead.
         confidence=Confidence.HIGH,
         notes=["a missing hardening header is a defence-in-depth gap, not an "
                "exploitable flaw on its own"],

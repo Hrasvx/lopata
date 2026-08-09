@@ -107,8 +107,6 @@ def run(ctx, phase=None) -> None:
         phase.set_total(max(len(targets), 1))
 
     async def _driver():
-        # Half the crawl concurrency, as the thread pool used, and a timeout wide
-        # enough to let the time-based sleep payloads return without tripping it.
         conc = max(ctx.threads // 2, 1)
         async with AsyncFetcher.from_ctx(
                 ctx, concurrency=conc,

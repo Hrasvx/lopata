@@ -46,7 +46,8 @@ def run(ctx, phase=None) -> None:
                 "-timeout", str(int(ctx.timeout) + 5),
                 "-l", list_path]
         proc = run_tool(argv, timeout=int(ctx.config.get("httpx_timeout", 120)),
-                        logger=ctx.logger)
+                        logger=ctx.logger,
+                        ctx=ctx, tool="httpx")
     phase and phase.step()
     if proc is None or not proc.stdout.strip():
         return

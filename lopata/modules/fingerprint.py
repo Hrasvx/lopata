@@ -49,7 +49,7 @@ _POWERED_PATTERNS = [
     (re.compile(r"Phusion Passenger(?:\s*([\d.]+))?", re.I), "Phusion Passenger", "Web Server", 1),
 ]
 
-# Session cookie names are one of the most reliable passive language tells.
+# Session cookie names are one of the most relaible passive language tells.
 _COOKIE_TECH = {
     "phpsessid": ("PHP", "Language"),
     "jsessionid": ("Java", "Language"),

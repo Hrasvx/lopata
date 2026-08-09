@@ -106,9 +106,6 @@ def _footer(canvas, doc):
     canvas.restoreState()
 
 
-# --------------------------------------------------------------------------
-# Cover & summary
-# --------------------------------------------------------------------------
 
 def _cover(story, ss, ctx, findings, meta, scores) -> None:
     story.append(Paragraph("Security Assessment", ss["LTitle"]))
@@ -190,6 +187,7 @@ def _cover(story, ss, ctx, findings, meta, scores) -> None:
 
 def _executive_summary(story, ss, ctx, findings, scores) -> None:
     story.append(Paragraph("Executive Summary", ss["LH1"]))
+    _completeness_banner(story, ss, scores)
 
     confirmed_vulns = [f for f in findings
                        if f.ftype is FindingType.CONFIRMED_VULN]
@@ -269,9 +267,30 @@ def _executive_summary(story, ss, ctx, findings, scores) -> None:
             story.append(Spacer(1, 3))
 
 
-# --------------------------------------------------------------------------
-# Scores
-# --------------------------------------------------------------------------
+def _completeness_banner(story, ss, scores) -> None:
+    """Say up front when the run did not finish.
+
+    Placed above the verdict rather than buried in the appendix: every number
+    below it is conditional on the coverage it describes, and it is never
+    folded into the score, which would hide it.
+    """
+    banner = (scores.get("scan_completeness") or {}).get("banner")
+    if not banner:
+        return
+    table = Table([[Paragraph(f"<b>Incomplete scan.</b> {html.escape(banner)}",
+                              ss["LSmall"])]], colWidths=[17.2 * cm])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fef3c7")),
+        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#f59e0b")),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(table)
+    story.append(Spacer(1, 8))
+
+
 
 def _score_section(story, ss, scores) -> None:
     categories = scores.get("categories") or {}
@@ -333,9 +352,6 @@ def _score_section(story, ss, scores) -> None:
     story.append(table)
 
 
-# --------------------------------------------------------------------------
-# Technology & attack surface
-# --------------------------------------------------------------------------
 
 def _technology_section(story, ss, ctx) -> None:
     if not ctx.technologies:
@@ -430,9 +446,6 @@ def _attack_surface_section(story, ss, ctx) -> None:
             + (" …" if len(ctx.subdomains) > 60 else ""), ss["LSmall"]))
 
 
-# --------------------------------------------------------------------------
-# Priorities and finding tables
-# --------------------------------------------------------------------------
 
 def _priorities(story, ss, findings) -> None:
     actionable = [f for f in findings
@@ -560,9 +573,6 @@ def _findings_by_category(story, ss, findings) -> None:
     story.append(table)
 
 
-# --------------------------------------------------------------------------
-# Detailed findings
-# --------------------------------------------------------------------------
 
 def _details(story, ss, findings) -> None:
     if not findings:
@@ -688,9 +698,6 @@ def _mono(text, limit) -> str:
     return html.escape(text).replace("\n", "<br/>").replace(" ", "&nbsp;")
 
 
-# --------------------------------------------------------------------------
-# Passed checks & appendix
-# --------------------------------------------------------------------------
 
 def _passed_checks(story, ss, ctx) -> None:
     if not ctx.passed_checks:

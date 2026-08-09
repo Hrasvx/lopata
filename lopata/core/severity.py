@@ -57,8 +57,6 @@ class SeverityFactors:
     exposure: Exposure = Exposure.PUBLIC
     confidence: Confidence = Confidence.MEDIUM
     cvss: float | None = None
-    # Free-form notes appended verbatim to the explanation (e.g. "public
-    # exploit exists for this version").
     notes: list[str] = field(default_factory=list)
 
 
@@ -91,9 +89,6 @@ _EXPOSURE_ADJ = {
     Exposure.PUBLIC: 0.5,
 }
 
-# Unverified evidence must not manufacture alarming severities. A finding
-# resting on a banner alone can never be worse than Low, no matter what the
-# scanner that produced it claimed.
 _CONFIDENCE_CAP = {
     Confidence.INFORMATIONAL: Severity.INFO,
     Confidence.LOW: Severity.LOW,

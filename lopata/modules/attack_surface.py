@@ -95,8 +95,6 @@ def _group_finding(ctx, group: str, services: list) -> None:
             profiles.append(prof)
 
     public_facing = [s for s in services if not s.internal]
-    # A group whose services all belong on the internet is inventory; one that
-    # contains something which should never face the internet is an exposure.
     unexpected = [s for s in services
                   if not s.internal
                   and not profile_for(s.port, s.name).public_ok]
@@ -117,9 +115,6 @@ def _group_finding(ctx, group: str, services: list) -> None:
     verification = " ".join(prof.verification for prof in profiles
                             if prof.verification)
 
-    # Reportable as an exposure either because the service type does not belong
-    # on the internet at all, or because it is administrative — public SSH is
-    # normal practice and still deserves a line in the report.
     reportable = unexpected or ([s for s in public_facing]
                                 if group in SENSITIVE_GROUPS else [])
 

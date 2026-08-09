@@ -85,9 +85,6 @@ def run(ctx, phase=None) -> None:
         ctx.add_technology(Technology(
             name=name.strip(), version=version.strip(),
             category=classify(name), sources=[MODULE_NAME],
-            # A fingerprint is an observation about what is running; it is not
-            # a claim that anything is wrong, so it never carries more than
-            # medium confidence on its own.
             confidence=Confidence.MEDIUM,
             evidence=evidence[:200],
         ))
@@ -97,7 +94,8 @@ def _run_whatweb(ctx, info) -> list[tuple[str, str, str]]:
     argv = [info.path, "--log-json=-", "--no-errors", "-a",
             str(ctx.config.get("whatweb_aggression", 1)), ctx.target]
     proc = run_tool(argv, timeout=int(ctx.config.get("whatweb_timeout", 90)),
-                    logger=ctx.logger)
+                    logger=ctx.logger,
+                    ctx=ctx, tool="whatweb")
     if proc is None or not proc.stdout.strip():
         return []
     ctx.add_raw_output("whatweb", proc.stdout)
@@ -126,7 +124,8 @@ def _run_whatweb(ctx, info) -> list[tuple[str, str, str]]:
 
 
 def _run_wappalyzer(ctx, info) -> list[tuple[str, str, str]]:
-    proc = run_tool([info.path, ctx.target], timeout=90, logger=ctx.logger)
+    proc = run_tool([info.path, ctx.target], timeout=90, logger=ctx.logger,
+    ctx=ctx, tool="whatweb")
     if proc is None or not proc.stdout.strip():
         return []
     ctx.add_raw_output("wappalyzer", proc.stdout)

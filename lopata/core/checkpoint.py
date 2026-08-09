@@ -6,10 +6,7 @@ import os
 from .models import (BusinessImpact, Confidence, Effort, Finding, FindingType,
                      PassedCheck, Service, Severity, Technology)
 
-# Bumped when the on-disk shape changes. A checkpoint from an older version is
-# ignored rather than half-restored: a resumed scan that silently dropped the
-# evidence fields would produce a weaker report than a fresh one.
-CHECKPOINT_VERSION = 2
+CHECKPOINT_VERSION = 3
 
 
 def checkpoint_path(target: str, explicit: str | None = None) -> str:
@@ -34,6 +31,8 @@ def save(ctx, path: str, completed: list[str]) -> None:
         "technologies": [t.as_dict() for t in ctx.technologies.values()],
         "services": [s.as_dict() for s in ctx.services],
         "raw_outputs": ctx.raw_outputs,
+        "tool_status": ctx.tool_status.as_dict(),
+        "retry_attempts": _attempts_spent(ctx),
     }
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
@@ -56,6 +55,7 @@ def load(ctx, path: str) -> list[str]:
             "ignoring checkpoint written by an older lopata version")
         return []
 
+    ctx.tool_status.restore(data.get("tool_status") or {})
     ctx.discovered_urls.update(data.get("discovered_urls", []))
     ctx.subdomains.update(data.get("subdomains", []))
     ctx.forms.extend(data.get("forms", []))
@@ -87,6 +87,33 @@ def load(ctx, path: str) -> list[str]:
             tunnel=d.get("tunnel", "")))
 
     return data.get("completed_modules", [])
+
+
+def resumed_attempts(path: str) -> dict:
+    """Retry attempts already spent per tool, for :class:`RetrySupervisor`.
+
+    Read straight off the checkpoint file rather than from the context so the
+    supervisor can be built before the scan context is restored.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (json.JSONDecodeError, OSError, FileNotFoundError):
+        return {}
+    if data.get("version") != CHECKPOINT_VERSION:
+        return {}
+    attempts = data.get("retry_attempts")
+    if isinstance(attempts, dict):
+        return {str(k): int(v) for k, v in attempts.items()
+                if str(v).lstrip("-").isdigit()}
+    return {}
+
+
+def _attempts_spent(ctx) -> dict:
+    supervisor = getattr(ctx, "retry_supervisor", None)
+    if supervisor is not None and hasattr(supervisor, "attempts_spent"):
+        return supervisor.attempts_spent()
+    return ctx.tool_status.attempts_by_tool()
 
 
 def clear(path: str) -> None:
@@ -140,4 +167,6 @@ def _finding_from_dict(d: dict) -> Finding:
         related_locations=[a for a in affected if a != d["location"]],
         score_area=d.get("score_area", ""),
         verified_by=d.get("verified_by", ""),
+        contributing_tools=list(d.get("contributing_tools", [])),
+        incomplete_coverage=bool(d.get("incomplete_coverage", False)),
     )
